@@ -152,8 +152,24 @@ struct Theme {
     Color barTop, barBot, border1, border2, sheen, accent, labelBg, labelFg, labelBorder, hl, divider;
     BYTE shadowA = 70;
     bool dark = true;
+    // Forme et style (themes\<nom>\theme.ini)
+    std::wstring name, category, desc;
+    float cornerR = 0.34f;     // rayon des coins de la barre, en fraction de sa hauteur
+    float borderW = 1.2f;      // épaisseur du liseré
+    Color glow = Color(255, 0, 0, 0);  // teinte de l'ombre / halo
+    // Couleurs de la fenêtre Paramètres
+    Color uiBg, uiPanel, uiText, uiMuted;
 };
-static Theme MakeTheme(const std::wstring& name) {
+
+// Style des tuiles générées (lettres, glyphes) et dossier d'icônes du thème actif
+struct TileStyle {
+    int shape = 0;  // 0 squircle, 1 cercle, 2 carré, 3 hexagone
+    std::vector<std::pair<unsigned, unsigned>> pal;
+};
+static TileStyle g_tile;
+static std::wstring g_themeDir;  // ...\Themes\<nom> (vide si le thème n'existe pas sur le disque)
+
+static Theme BuiltinTheme(const std::wstring& name) {
     Theme t;
     std::wstring n = Lower(name);
     if (n == L"light") {
@@ -197,7 +213,132 @@ static Theme MakeTheme(const std::wstring& name) {
         t.divider = Color(70, 255, 255, 255);
         t.shadowA = 76;
     }
+    t.name = name;
+    t.category = L"Classique";
+    t.uiBg = t.dark ? Color(255, 24, 26, 34) : Color(255, 243, 245, 250);
+    t.uiPanel = t.dark ? Color(255, 32, 35, 46) : Color(255, 230, 234, 243);
+    t.uiText = t.dark ? Color(255, 238, 240, 246) : Color(255, 28, 30, 36);
+    t.uiMuted = t.dark ? Color(255, 150, 156, 172) : Color(255, 102, 112, 136);
     return t;
+}
+
+// ---- lecture de themes\<nom>\theme.ini -------------------------------------------------------
+static std::wstring ThemesRoot() { return ExeDir() + L"\\Themes"; }
+
+static std::wstring ThemeIni(const std::wstring& ini, const wchar_t* sec, const wchar_t* key, const wchar_t* def = L"") {
+    wchar_t buf[2048];
+    GetPrivateProfileStringW(sec, key, def, buf, 2048, ini.c_str());
+    return Trim(buf);
+}
+// AARRGGBB ou RRGGBB
+static Color HexToColor(const std::wstring& h, const Color& def) {
+    if (h.size() != 6 && h.size() != 8) return def;
+    wchar_t* end = nullptr;
+    unsigned long v = wcstoul(h.c_str(), &end, 16);
+    if (!end || *end) return def;
+    if (h.size() == 6) v |= 0xFF000000ul;
+    return Color((BYTE)(v >> 24), (BYTE)(v >> 16), (BYTE)(v >> 8), (BYTE)v);
+}
+
+// apply = true : met à jour le style de tuile et le dossier d'icônes globaux (thème actif).
+// apply = false : lecture seule (aperçus de la galerie).
+static Theme LoadThemeEx(const std::wstring& nameIn, bool apply) {
+    std::wstring name = nameIn.empty() ? L"Dark" : nameIn;
+    Theme t = BuiltinTheme(name);
+    TileStyle ts;
+    if (apply) { g_tile = TileStyle(); g_themeDir.clear(); }
+    std::wstring dir = ThemesRoot() + L"\\" + name;
+    std::wstring ini = dir + L"\\theme.ini";
+    if (!PathFileExistsW(ini.c_str())) return t;
+    if (apply) g_themeDir = dir;
+    const wchar_t* C = L"Colors";
+    auto col = [&](const wchar_t* k, Color& dst) { dst = HexToColor(ThemeIni(ini, C, k), dst); };
+    col(L"BarTop", t.barTop); col(L"BarBottom", t.barBot); col(L"Border1", t.border1); col(L"Border2", t.border2);
+    col(L"Sheen", t.sheen); col(L"Accent", t.accent); col(L"LabelBg", t.labelBg); col(L"LabelFg", t.labelFg);
+    col(L"LabelBorder", t.labelBorder); col(L"Highlight", t.hl); col(L"Divider", t.divider);
+    std::wstring v = ThemeIni(ini, L"Theme", L"Name");
+    if (!v.empty()) t.name = v;
+    t.category = ThemeIni(ini, L"Theme", L"Category", L"Classique");
+    t.desc = ThemeIni(ini, L"Theme", L"Description");
+    t.dark = _wtoi(ThemeIni(ini, L"Theme", L"Dark", t.dark ? L"1" : L"0").c_str()) != 0;
+    v = ThemeIni(ini, L"Theme", L"CornerRadius");
+    if (!v.empty()) t.cornerR = std::min(std::max((float)_wtof(v.c_str()), 0.05f), 0.5f);
+    v = ThemeIni(ini, L"Theme", L"BorderWidth");
+    if (!v.empty()) t.borderW = std::min(std::max((float)_wtof(v.c_str()), 0.0f), 6.0f);
+    v = ThemeIni(ini, L"Theme", L"ShadowAlpha");
+    if (!v.empty()) t.shadowA = (BYTE)std::min(std::max(_wtoi(v.c_str()), 0), 255);
+    t.glow = HexToColor(ThemeIni(ini, L"Theme", L"Glow", L"000000"), t.glow);
+    Color base = t.dark ? Color(255, 24, 26, 34) : Color(255, 243, 245, 250);
+    t.uiBg = HexToColor(ThemeIni(ini, L"UI", L"Bg"), base);
+    t.uiPanel = HexToColor(ThemeIni(ini, L"UI", L"Panel"), t.uiPanel);
+    t.uiText = HexToColor(ThemeIni(ini, L"UI", L"Text"), t.uiText);
+    t.uiMuted = HexToColor(ThemeIni(ini, L"UI", L"Muted"), t.uiMuted);
+    std::wstring shp = Lower(ThemeIni(ini, L"Theme", L"TileShape", L"squircle"));
+    ts.shape = shp == L"circle" ? 1 : (shp == L"square" ? 2 : (shp == L"hex" ? 3 : 0));
+    // Palette : RRGGBB:RRGGBB,RRGGBB:RRGGBB,...
+    std::wstring pal = ThemeIni(ini, L"Tiles", L"Palette");
+    size_t st = 0;
+    while (st < pal.size()) {
+        size_t e = pal.find(L',', st);
+        std::wstring pr = pal.substr(st, e == std::wstring::npos ? e : e - st);
+        st = (e == std::wstring::npos) ? pal.size() : e + 1;
+        size_t c = pr.find(L':');
+        if (c == std::wstring::npos) continue;
+        Color a = HexToColor(Trim(pr.substr(0, c)), Color(255, 79, 141, 247));
+        Color b = HexToColor(Trim(pr.substr(c + 1)), Color(255, 43, 85, 214));
+        ts.pal.emplace_back(((unsigned)a.GetR() << 16) | ((unsigned)a.GetG() << 8) | a.GetB(),
+                                ((unsigned)b.GetR() << 16) | ((unsigned)b.GetG() << 8) | b.GetB());
+    }
+    if (apply) g_tile = ts;
+    return t;
+}
+static Theme LoadTheme(const std::wstring& name) { return LoadThemeEx(name, true); }
+
+struct ThemeInfo {
+    std::wstring folder, name, category, desc;
+};
+static int CategoryRank(const std::wstring& c) {
+    std::wstring l = Lower(c);
+    if (l == L"classique") return 0;
+    if (l == L"informatique") return 1;
+    if (l == L"ia") return 2;
+    if (l == L"games") return 3;
+    return 4;
+}
+static std::wstring CategoryLabel(const std::wstring& c) {
+    if (g_fr) return c;
+    std::wstring l = Lower(c);
+    if (l == L"classique") return L"Classic";
+    if (l == L"informatique") return L"Computing";
+    if (l == L"ia") return L"AI";
+    return c;
+}
+static std::vector<ThemeInfo> EnumThemes() {
+    std::vector<ThemeInfo> v;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((ThemesRoot() + L"\\*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
+            std::wstring ini = ThemesRoot() + L"\\" + fd.cFileName + L"\\theme.ini";
+            if (!PathFileExistsW(ini.c_str())) continue;
+            ThemeInfo ti;
+            ti.folder = fd.cFileName;
+            ti.name = ThemeIni(ini, L"Theme", L"Name", fd.cFileName);
+            ti.category = ThemeIni(ini, L"Theme", L"Category", L"Classique");
+            ti.desc = ThemeIni(ini, L"Theme", L"Description");
+            v.push_back(ti);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    if (v.empty())
+        for (const wchar_t* n : {L"Dark", L"Light", L"Aurora"}) v.push_back({n, n, L"Classique", L""});
+    std::stable_sort(v.begin(), v.end(), [](const ThemeInfo& a, const ThemeInfo& b) {
+        int ra = CategoryRank(a.category), rb = CategoryRank(b.category);
+        if (ra != rb) return ra < rb;
+        return Lower(a.name) < Lower(b.name);
+    });
+    return v;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -374,7 +515,20 @@ static Bitmap* MakeTile(const std::wstring& glyph, bool badge, unsigned c1, unsi
     g.SetTextRenderingHint(TextRenderingHintAntiAlias);
     RectF r(10, 10, 236, 236);
     GraphicsPath path;
-    RRPath(path, r, 56);
+    switch (g_tile.shape) {
+        case 1: path.AddEllipse(r); break;
+        case 2: RRPath(path, r, 22); break;
+        case 3: {
+            PointF pts[6];
+            for (int i = 0; i < 6; ++i) {
+                float a = (60.0f * i - 90.0f) * 3.14159265f / 180.0f;
+                pts[i] = PointF(128 + 124 * std::cos(a), 128 + 124 * std::sin(a));
+            }
+            path.AddPolygon(pts, 6);
+            break;
+        }
+        default: RRPath(path, r, 56); break;
+    }
     LinearGradientBrush grad(PointF(10, 10), PointF(246, 246),
                              Color(255, (c1 >> 16) & 255, (c1 >> 8) & 255, c1 & 255),
                              Color(255, (c2 >> 16) & 255, (c2 >> 8) & 255, c2 & 255));
@@ -415,9 +569,13 @@ static Bitmap* LetterTile(const std::wstring& title) {
     wchar_t ch = title.empty() ? L'?' : (wchar_t)towupper(title[0]);
     size_t hsh = 0;
     for (wchar_t c : title) hsh = hsh * 31 + (size_t)c;
-    const unsigned* p = pal[hsh % 6];
+    unsigned c1 = pal[hsh % 6][0], c2 = pal[hsh % 6][1];
+    if (!g_tile.pal.empty()) {
+        const auto& pp = g_tile.pal[hsh % g_tile.pal.size()];
+        c1 = pp.first; c2 = pp.second;
+    }
     std::wstring s(1, ch);
-    return MakeTile(s, false, p[0], p[1], L"Segoe UI", true);
+    return MakeTile(s, false, c1, c2, L"Segoe UI", true);
 }
 
 // glyph:E8B7[:RRGGBB[:RRGGBB]][!]
@@ -442,17 +600,40 @@ static Bitmap* GlyphTile(const std::wstring& specIn) {
     return MakeTile(g, badge, c1, c2, font, false);
 }
 
+// Icône de secours quand le thème n'a pas (ou plus) l'image demandée
+static std::wstring ThemeFallbackSpec(const std::wstring& key) {
+    if (key == L"computer") return L"glyph:E7F4:5B9BFF:2F64D8";
+    if (key == L"folder") return L"glyph:E8B7:F6B04A:E3801C";
+    if (key == L"documents") return L"glyph:E8A5:46C9A0:1C9072";
+    if (key == L"downloads") return L"glyph:E896:46C9A0:1C9072";
+    if (key == L"recycle") return L"glyph:E74D:7C8BA3:4B5870";
+    if (key == L"recycle_full") return L"glyph:E74D:F2A33A:E07B0F!";
+    if (key == L"settings") return L"glyph:E713:7C8BA3:4B5870";
+    return L"";
+}
+
 static std::vector<Bitmap*> LoadImageSpec(const std::wstring& specIn, const std::wstring& cmd,
                                           const std::wstring& title) {
     std::wstring spec = Trim(specIn);
     Bitmap* m = nullptr;
     if (StartsWith(Lower(spec), L"glyph:")) {
         m = GlyphTile(spec);
+    } else if (StartsWith(Lower(spec), L"theme:") || (spec.empty() && cmd == kRecycle)) {
+        std::wstring key = spec.empty() ? std::wstring(L"recycle") : Lower(spec.substr(6));
+        if (!g_themeDir.empty()) {
+            std::wstring p = g_themeDir + L"\\Icons\\" + key + L".png";
+            if (PathFileExistsW(p.c_str())) {
+                Bitmap src(p.c_str());
+                if (src.GetLastStatus() == Ok) m = Master(&src, 0, 0, (float)src.GetWidth(), (float)src.GetHeight());
+            }
+        }
+        if (!m) {
+            std::wstring fb = ThemeFallbackSpec(key);
+            if (!fb.empty()) m = GlyphTile(fb);
+        }
     } else {
         std::wstring path = spec.empty() ? ResolvePath(cmd) : ResolvePath(spec);
-        if (spec.empty() && cmd == kRecycle) {
-            m = GlyphTile(L"glyph:E74D:7C8BA3:4B5870");
-        } else if (!path.empty() && path[0] != L'[' && !StartsWith(Lower(path), L"shell:") && PathFileExistsW(path.c_str())) {
+        if (!path.empty() && path[0] != L'[' && !StartsWith(Lower(path), L"shell:") && PathFileExistsW(path.c_str())) {
             std::wstring ext = ExtOf(path);
             if (ext == L".png" || ext == L".jpg" || ext == L".jpeg" || ext == L".bmp" || ext == L".gif" ||
                 ext == L".tif" || ext == L".tiff") {
@@ -476,7 +657,7 @@ static void LoadItemImages(Item& it) {
     if (!Trim(it.file2).empty())
         it.lv2 = LoadImageSpec(it.file2, it.cmd, it.title);
     else if (it.cmd == kRecycle && Trim(it.file).empty())
-        it.lv2 = LoadImageSpec(L"glyph:E74D:F2A33A:E07B0F!", it.cmd, it.title);
+        it.lv2 = LoadImageSpec(L"theme:recycle_full", it.cmd, it.title);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -713,7 +894,7 @@ static void Render() {
     if (A.items.empty()) { u0 = G.L * 0.5f - 45 * S; u1 = G.L * 0.5f + 45 * S; }  // pastille minimale cliquable
     const float bv0 = G.edgeGap + vs, bv1 = bv0 + G.barH;
     const RectF bar = MapRect(u0, u1, bv0, bv1);
-    const float rad = G.barH * 0.34f;
+    const float rad = G.barH * th.cornerR;
 
     // Ombre portée douce (couches concentriques)
     for (int i = 14; i >= 1; --i) {
@@ -722,7 +903,7 @@ static void Render() {
         GraphicsPath p;
         RRPath(p, r, rad + e);
         float k = 1.0f - (float)i / 15.0f;
-        SolidBrush sb(Color((BYTE)(th.shadowA * k * k * 0.30f * op), 0, 0, 0));
+        SolidBrush sb(Color((BYTE)(th.shadowA * k * k * 0.30f * op), th.glow.GetR(), th.glow.GetG(), th.glow.GetB()));
         g.FillPath(&sb, &p);
     }
     // Fond "verre"
@@ -739,7 +920,7 @@ static void Render() {
     g.ResetClip();
     LinearGradientBrush edgeBr(RectF(bar.X, bar.Y - 1, bar.Width, bar.Height + 2), WithAlpha(th.border1, op),
                                WithAlpha(th.border2, op), LinearGradientModeVertical);
-    Pen edge(&edgeBr, 1.2f * S);
+    Pen edge(&edgeBr, std::max(0.5f, th.borderW) * S);
     g.DrawPath(&edge, &barPath);
 
     // Éléments
@@ -854,7 +1035,7 @@ static void Render() {
 // ---------------------------------------------------------------------------------------------
 static void SaveSettings() {
     const Settings& s = A.set;
-    IniPut(kSecMain, L"Version", L"2.1.0");
+    IniPut(kSecMain, L"Version", L"2.2.0");
     IniPut(kSecMain, L"Position", SideName(s.side));
     IniPutInt(kSecMain, L"Offset", s.offset);
     IniPutInt(kSecMain, L"Monitor", s.monitor);
@@ -899,9 +1080,9 @@ static Item MakeItem(const std::wstring& title, const std::wstring& cmd, const s
 
 static void DefaultItems() {
     A.items.clear();
-    A.items.push_back(MakeItem(T(L"Ce PC", L"This PC"), L"shell:MyComputerFolder", L"glyph:E7F4:5B9BFF:2F64D8"));
-    A.items.push_back(MakeItem(T(L"Documents", L"Documents"), L"shell:Personal", L"glyph:E8B7:F6B04A:E3801C"));
-    A.items.push_back(MakeItem(T(L"Téléchargements", L"Downloads"), L"shell:Downloads", L"glyph:E896:46C9A0:1C9072"));
+    A.items.push_back(MakeItem(T(L"Ce PC", L"This PC"), L"shell:MyComputerFolder", L"theme:computer"));
+    A.items.push_back(MakeItem(T(L"Documents", L"Documents"), L"shell:Personal", L"theme:documents"));
+    A.items.push_back(MakeItem(T(L"Téléchargements", L"Downloads"), L"shell:Downloads", L"theme:downloads"));
     Item sp; sp.sep = true; A.items.push_back(sp);
     Item rb = MakeItem(T(L"Corbeille", L"Recycle Bin"), kRecycle, L"");
     rb.ctx = true;
@@ -951,8 +1132,8 @@ static void LoadSettings() {
             A.items.push_back(it);
         }
     }
+    A.th = LoadTheme(s.theme);  // avant les images : les icônes theme: en dépendent
     for (auto& it : A.items) LoadItemImages(it);
-    A.th = MakeTheme(s.theme);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1166,14 +1347,27 @@ static void RegisterToggleHotkey() {
 enum {
     ID_OPEN = 100, ID_ADMIN, ID_LOCATION, ID_REMOVE, ID_EMPTYBIN,
     ID_ADDPROG = 200, ID_ADDSEP, ID_LOCK, ID_AUTOHIDE, ID_LABELS, ID_RUNNING, ID_OPENINI, ID_RELOAD, ID_EXIT, ID_SETTINGS,
-    ID_POS = 300, ID_THEME = 310, ID_SIZE = 320
+    ID_POS = 300, ID_SIZE = 320, ID_THEME = 1200
 };
 static const int kSizes[][2] = {{36, 64}, {44, 80}, {56, 100}, {68, 120}};
-static const wchar_t* kThemes[] = {L"Dark", L"Light", L"Aurora"};
+static std::vector<ThemeInfo> g_menuThemes;  // thèmes du sous-menu courant
+static void ApplyTheme(const std::wstring& name);
 
 static HWND g_setWnd = nullptr;     // fenêtre Paramètres (settings_ui.h)
 static void OpenSettings();
 static void ApplyIconOpacity();
+
+static void RefreshSettingsTheme();  // settings_ui.h
+
+static void ApplyTheme(const std::wstring& name) {
+    A.set.theme = name;
+    A.th = LoadTheme(name);
+    for (auto& it : A.items) LoadItemImages(it);  // les icônes theme: changent avec le thème
+    ApplyMenuTheme();
+    A.dirty = true;
+    SaveSettings();
+    RefreshSettingsTheme();
+}
 
 static void Reload() {
     LoadSettings();
@@ -1211,9 +1405,18 @@ static void ShowMenu(int hitIdx) {
     AppendMenuW(m, MF_POPUP, (UINT_PTR)pos, T(L"Position à l'écran", L"Screen position"));
 
     HMENU th = CreatePopupMenu();
-    const wchar_t* thNames[] = {T(L"Sombre", L"Dark"), T(L"Clair", L"Light"), T(L"Aurore", L"Aurora")};
-    for (int i = 0; i < 3; ++i)
-        AppendMenuW(th, MF_STRING | (Lower(A.set.theme) == Lower(kThemes[i]) ? MF_CHECKED : 0), ID_THEME + i, thNames[i]);
+    g_menuThemes = EnumThemes();
+    std::wstring lastCat;
+    for (size_t i = 0; i < g_menuThemes.size() && i < 90; ++i) {
+        const ThemeInfo& ti = g_menuThemes[i];
+        if (Lower(ti.category) != lastCat) {
+            if (!lastCat.empty()) AppendMenuW(th, MF_SEPARATOR, 0, nullptr);
+            lastCat = Lower(ti.category);
+            AppendMenuW(th, MF_STRING | MF_GRAYED | MF_DISABLED, 0, CategoryLabel(ti.category).c_str());
+        }
+        AppendMenuW(th, MF_STRING | (Lower(A.set.theme) == Lower(ti.folder) ? MF_CHECKED : 0), ID_THEME + (UINT)i,
+                    ti.name.c_str());
+    }
     AppendMenuW(m, MF_POPUP, (UINT_PTR)th, T(L"Thème", L"Theme"));
 
     HMENU sz = CreatePopupMenu();
@@ -1293,11 +1496,8 @@ static void ShowMenu(int hitIdx) {
             if (cmd >= ID_POS && cmd < ID_POS + 4) {
                 A.set.side = cmd - ID_POS;
                 RecalcGeometry(); SaveSettings();
-            } else if (cmd >= ID_THEME && cmd < ID_THEME + 3) {
-                A.set.theme = kThemes[cmd - ID_THEME];
-                A.th = MakeTheme(A.set.theme);
-                ApplyMenuTheme();
-                A.dirty = true; SaveSettings();
+            } else if (cmd >= ID_THEME && cmd < ID_THEME + (int)g_menuThemes.size()) {
+                ApplyTheme(g_menuThemes[cmd - ID_THEME].folder);
             } else if (cmd >= ID_SIZE && cmd < ID_SIZE + 4) {
                 A.set.iconMin = kSizes[cmd - ID_SIZE][0];
                 A.set.iconMax = kSizes[cmd - ID_SIZE][1];

@@ -1,13 +1,15 @@
-// settings_ui.h - Fenêtre "Paramètres" (réglages complets, éléments du dock, mise à jour directe).
+// settings_ui.h - Fenêtre "Paramètres" moderne (thème dynamique, galerie de thèmes, réglages, éléments, mise à jour).
 // Inclus par main.cpp : utilise l'état global A et les fonctions du dock.
 #pragma once
 #include <commctrl.h>
+#include <uxtheme.h>
 #include <winhttp.h>
 
-static const wchar_t* kVersionW = L"2.1.0";
+static const wchar_t* kVersionW = L"2.2.0";
 static const wchar_t* kDefaultUpdateUrl = L"https://raw.githubusercontent.com/agentia-GIT/Windows-Dock/main/dist/";
 
 enum {
+    IDC_NAV = 999,
     IDC_TAB = 1000,
     IDC_ICONMIN = 1101, IDC_ICONMAX, IDC_ZOOM, IDC_THOP, IDC_ICOP, IDC_OFFSET, IDC_AHDELAY,
     IDC_POS = 1110, IDC_THEME, IDC_MON, IDC_FONT, IDC_HOTKEY, IDC_HKAPPLY,
@@ -15,40 +17,76 @@ enum {
     IDC_LIST = 1130, IDC_ADD, IDC_ADDSEP, IDC_DEL, IDC_UP, IDC_DOWN,
     IDC_E_TITLE = 1140, IDC_E_CMD, IDC_E_ARGS, IDC_E_WD, IDC_E_ICON, IDC_B_CMD, IDC_B_ICON, IDC_E_SHOW, IDC_APPLYITEM,
     IDC_U_LOCAL = 1150, IDC_U_REMOTE, IDC_U_CHECK, IDC_U_UPDATE, IDC_U_LOG, IDC_U_FOLDER,
-    IDC_CLOSE = 1160
+    IDC_CLOSE = 1160,
+    IDC_GAL = 1170, IDC_GAL_FOLDER, IDC_GAL_REFRESH, IDC_HDR, IDC_HINT
 };
 static const int kValueLabelOffset = 500;  // le libellé de valeur d'un curseur a l'ID du curseur + 500
 enum { WM_UPD = WM_APP + 1 };               // wParam : 0 statut, 1 version distante, 2 succès, 3 échec
 
-static HWND g_tab = nullptr, g_pg[4] = {};
-static HFONT g_font = nullptr;
+// Pages : 0 Apparence, 1 Comportement, 2 Éléments, 3 Mise à jour, 4 Galerie de thèmes
+static const int kPages = 5;
+static const int kNavPage[kPages] = {4, 0, 1, 2, 3};  // ordre de la barre latérale -> page
+static HWND g_nav = nullptr, g_pg[kPages] = {};
+static int g_navSel = 0, g_navHot = -1;
+static HFONT g_font = nullptr, g_fontH = nullptr, g_fontS = nullptr;
 static bool g_filling = false;
 static volatile LONG g_updBusy = 0;
+static int g_dx = 0, g_dy = 0;  // décalage appliqué aux contrôles créés par Mk()
+
+// Couleurs de l'interface, copiées du thème actif
+static COLORREF g_cBg = 0, g_cPanel = 0, g_cText = 0, g_cMuted = 0, g_cAccent = 0;
+static HBRUSH g_brBg = nullptr, g_brPanel = nullptr;
+static bool g_uiDark = true;
 
 static int SC(int v) { return (int)(v * A.g.S + 0.5f); }
+static COLORREF Cr(const Color& c) { return RGB(c.GetR(), c.GetG(), c.GetB()); }
+static Color Gc(COLORREF c, BYTE a = 255) { return Color(a, GetRValue(c), GetGValue(c), GetBValue(c)); }
+static COLORREF Mix(COLORREF a, COLORREF b, int pct) {  // pct % de b
+    auto m = [&](int x, int y) { return (x * (100 - pct) + y * pct) / 100; };
+    return RGB(m(GetRValue(a), GetRValue(b)), m(GetGValue(a), GetGValue(b)), m(GetBValue(a), GetBValue(b)));
+}
+
+static void UpdateUiColors() {
+    const Theme& t = A.th;
+    g_cBg = Cr(t.uiBg); g_cPanel = Cr(t.uiPanel); g_cText = Cr(t.uiText); g_cMuted = Cr(t.uiMuted);
+    g_cAccent = Cr(t.accent);
+    g_uiDark = t.dark;
+    if (g_brBg) DeleteObject(g_brBg);
+    if (g_brPanel) DeleteObject(g_brPanel);
+    g_brBg = CreateSolidBrush(g_cBg);
+    g_brPanel = CreateSolidBrush(g_cPanel);
+}
 
 // ---------------------------------------------------------------------------------------------
 // Outils de création de contrôles
 // ---------------------------------------------------------------------------------------------
 static HWND Mk(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y, int w, int h, int id,
                DWORD ex = 0) {
-    HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, SC(x), SC(y), SC(w), SC(h), parent,
+    HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, SC(x + g_dx), SC(y + g_dy), SC(w), SC(h), parent,
                              (HMENU)(INT_PTR)id, A.hInst, nullptr);
     if (c && g_font) SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
     return c;
 }
 static HWND Lbl(HWND p, const wchar_t* t, int x, int y, int w, int h = 20) { return Mk(p, L"STATIC", t, SS_LEFT, x, y, w, h, 0); }
-static HWND Btn(HWND p, const wchar_t* t, int x, int y, int w, int id, int h = 26) {
-    return Mk(p, L"BUTTON", t, BS_PUSHBUTTON | WS_TABSTOP, x, y, w, h, id);
+static HWND Hint(HWND p, const wchar_t* t, int x, int y, int w, int h = 20) { return Mk(p, L"STATIC", t, SS_LEFT, x, y, w, h, IDC_HINT); }
+static HWND Btn(HWND p, const wchar_t* t, int x, int y, int w, int id, int h = 28) {
+    return Mk(p, L"BUTTON", t, BS_OWNERDRAW | WS_TABSTOP, x, y, w, h, id);
 }
+// Case à cocher dessinée en interrupteur : l'état est stocké dans GWLP_USERDATA
 static HWND Chk(HWND p, const wchar_t* t, int x, int y, int w, int id) {
-    return Mk(p, L"BUTTON", t, BS_AUTOCHECKBOX | WS_TABSTOP, x, y, w, 22, id);
+    return Mk(p, L"BUTTON", t, BS_OWNERDRAW | WS_TABSTOP, x, y, w, 26, id);
 }
+static bool ChkGet(HWND c) { return GetWindowLongPtrW(c, GWLP_USERDATA) != 0; }
+static void ChkSet(HWND c, bool on) {
+    SetWindowLongPtrW(c, GWLP_USERDATA, on ? 1 : 0);
+    InvalidateRect(c, nullptr, FALSE);
+}
+static bool IsSwitchId(int id) { return id >= IDC_AUTOHIDE && id <= IDC_AUTOSTART; }
 static HWND Edt(HWND p, int x, int y, int w, int id) {
-    return Mk(p, L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, x, y, w, 24, id, WS_EX_CLIENTEDGE);
+    return Mk(p, L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, x, y, w, 26, id);
 }
 static HWND Cmb(HWND p, int x, int y, int w, int id, std::initializer_list<const wchar_t*> items) {
-    HWND c = Mk(p, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, x, y, w, 200, id);
+    HWND c = Mk(p, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, x, y, w, 240, id);
     for (auto* s : items) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)s);
     return c;
 }
@@ -108,8 +146,19 @@ static void AutostartSet(bool on) {
 }
 
 // ---------------------------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------------------------
 // Mise à jour directe (WinHTTP)
 // ---------------------------------------------------------------------------------------------
+static HINTERNET g_sess = nullptr;  // session WinHTTP réutilisée pendant une mise à jour
+static void SessOpen() {
+    if (g_sess) return;
+    g_sess = WinHttpOpen(L"RocketDockModern/2.2", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!g_sess) g_sess = WinHttpOpen(L"RocketDockModern/2.2", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+}
+static void SessClose() {
+    if (g_sess) { WinHttpCloseHandle(g_sess); g_sess = nullptr; }
+}
 static bool HttpGet(const std::wstring& url, const std::wstring& token, std::string& out, DWORD& status) {
     status = 0;
     out.clear();
@@ -119,10 +168,9 @@ static bool HttpGet(const std::wstring& url, const std::wstring& token, std::str
     uc.lpszHostName = host; uc.dwHostNameLength = 256;
     uc.lpszUrlPath = path; uc.dwUrlPathLength = 2048;
     if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc)) return false;
-    HINTERNET s = WinHttpOpen(L"RocketDockModern/2.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
-                              WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!s) s = WinHttpOpen(L"RocketDockModern/2.1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
-                            WINHTTP_NO_PROXY_BYPASS, 0);
+    const bool own = (g_sess == nullptr);
+    if (own) SessOpen();
+    HINTERNET s = g_sess;
     if (!s) return false;
     bool ok = false;
     HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0);
@@ -153,7 +201,7 @@ static bool HttpGet(const std::wstring& url, const std::wstring& token, std::str
         WinHttpCloseHandle(r);
     }
     if (c) WinHttpCloseHandle(c);
-    WinHttpCloseHandle(s);
+    if (own) SessClose();
     return ok;
 }
 
@@ -186,10 +234,12 @@ static DWORD WINAPI UpdThread(LPVOID p) {
     const bool fr = g_fr;
     auto fail = [&](const std::wstring& m) {
         UpdPost(3, m);
+        SessClose();
         InterlockedExchange(&g_updBusy, 0);
         delete job;
         return (DWORD)0;
     };
+    SessOpen();
     UpdPost(0, fr ? L"Connexion à GitHub…" : L"Connecting to GitHub…");
     if (!HttpGet(job->base + L"version.txt", job->token, body, st) || st != 200)
         return fail((fr ? L"Impossible de lire la version distante (HTTP " : L"Cannot read remote version (HTTP ") +
@@ -197,6 +247,7 @@ static DWORD WINAPI UpdThread(LPVOID p) {
     std::wstring remote = TrimW(Utf8ToW(body));
     UpdPost(1, remote);
     if (!job->apply) {
+        SessClose();
         InterlockedExchange(&g_updBusy, 0);
         delete job;
         return 0;
@@ -278,6 +329,7 @@ static DWORD WINAPI UpdThread(LPVOID p) {
         }
     }
     UpdPost(2, remote);
+    SessClose();
     InterlockedExchange(&g_updBusy, 0);
     delete job;
     return 0;
@@ -300,6 +352,8 @@ static void StartUpdate(bool apply) {
     if (h) CloseHandle(h);
     else { InterlockedExchange(&g_updBusy, 0); delete j; }
 }
+
+// ---------------------------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------------------------
 // Synchronisation des contrôles <-> réglages
@@ -369,15 +423,31 @@ static bool ListIsStale() {
     return false;
 }
 
+static std::vector<ThemeInfo> g_setThemes;  // thèmes proposés dans la liste déroulante
+static void GalRebuild();
+
+static void FillThemeCombo() {
+    if (!g_pg[0]) return;
+    HWND c = GetDlgItem(g_pg[0], IDC_THEME);
+    if (!c) return;
+    SendMessageW(c, CB_RESETCONTENT, 0, 0);
+    g_setThemes = EnumThemes();
+    int sel = 0;
+    for (size_t i = 0; i < g_setThemes.size(); ++i) {
+        std::wstring l = g_setThemes[i].name + L"   ·   " + CategoryLabel(g_setThemes[i].category);
+        SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)l.c_str());
+        if (Lower(g_setThemes[i].folder) == Lower(A.set.theme)) sel = (int)i;
+    }
+    SendMessageW(c, CB_SETCURSEL, sel, 0);
+}
+
 // full = true : tout recharger (ouverture) ; false : réactivation (ne touche pas aux champs en cours d'édition)
 static void SyncControls(bool full = true) {
     if (!g_setWnd) return;
     const Settings& s = A.set;
     HWND a = g_pg[0], b = g_pg[1];
     SendMessageW(GetDlgItem(a, IDC_POS), CB_SETCURSEL, s.side, 0);
-    int th = 0;
-    for (int i = 0; i < 3; ++i) if (Lower(s.theme) == Lower(kThemes[i])) th = i;
-    SendMessageW(GetDlgItem(a, IDC_THEME), CB_SETCURSEL, th, 0);
+    if (full) FillThemeCombo();
     SendMessageW(GetDlgItem(a, IDC_MON), CB_SETCURSEL, std::max(0, s.monitor), 0);
     if (full || GetFocus() != GetDlgItem(a, IDC_FONT)) SetDlgItemTextW(a, IDC_FONT, s.fontName.c_str());
     SetSlider(a, IDC_ICONMIN, s.iconMin, L" px");
@@ -386,12 +456,12 @@ static void SyncControls(bool full = true) {
     SetSlider(a, IDC_OFFSET, s.offset, L" px");
     SetSlider(a, IDC_THOP, s.themeOpacity, L" %");
     SetSlider(a, IDC_ICOP, s.iconOpacity, L" %");
-    SendMessageW(GetDlgItem(b, IDC_AUTOHIDE), BM_SETCHECK, s.autoHide, 0);
-    SendMessageW(GetDlgItem(b, IDC_SHOWLABELS), BM_SETCHECK, !s.hideLabels, 0);
-    SendMessageW(GetDlgItem(b, IDC_LOCK), BM_SETCHECK, s.lockIcons, 0);
-    SendMessageW(GetDlgItem(b, IDC_RUNNING), BM_SETCHECK, s.showRunning, 0);
-    SendMessageW(GetDlgItem(b, IDC_OPENRUN), BM_SETCHECK, s.openRunning, 0);
-    SendMessageW(GetDlgItem(b, IDC_AUTOSTART), BM_SETCHECK, AutostartGet(), 0);
+    ChkSet(GetDlgItem(b, IDC_AUTOHIDE), s.autoHide);
+    ChkSet(GetDlgItem(b, IDC_SHOWLABELS), !s.hideLabels);
+    ChkSet(GetDlgItem(b, IDC_LOCK), s.lockIcons);
+    ChkSet(GetDlgItem(b, IDC_RUNNING), s.showRunning);
+    ChkSet(GetDlgItem(b, IDC_OPENRUN), s.openRunning);
+    ChkSet(GetDlgItem(b, IDC_AUTOSTART), AutostartGet());
     SetSlider(b, IDC_AHDELAY, s.autoHideDelay, L" ms");
     if (full || GetFocus() != GetDlgItem(b, IDC_HOTKEY)) SetDlgItemTextW(b, IDC_HOTKEY, s.hotkey.c_str());
     if (full || ListIsStale()) {
@@ -402,35 +472,472 @@ static void SyncControls(bool full = true) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Construction de la fenêtre
+// Dessin GDI+ commun
+// ---------------------------------------------------------------------------------------------
+static void DrawTxt(Graphics& g, const std::wstring& s, const Font& f, const RectF& r, const Color& c,
+                    StringAlignment h = StringAlignmentNear, StringAlignment v = StringAlignmentCenter, bool wrap = false) {
+    StringFormat sf;
+    sf.SetAlignment(h);
+    sf.SetLineAlignment(v);
+    sf.SetTrimming(StringTrimmingEllipsisCharacter);
+    if (!wrap) sf.SetFormatFlags(StringFormatFlagsNoWrap);
+    SolidBrush br(c);
+    g.DrawString(s.c_str(), -1, &f, r, &sf, &br);
+}
+static void FillRR(Graphics& g, const RectF& r, float rad, const Color& c) {
+    GraphicsPath p;
+    RRPath(p, r, rad);
+    SolidBrush b(c);
+    g.FillPath(&b, &p);
+}
+static void StrokeRR(Graphics& g, const RectF& r, float rad, const Color& c, float w) {
+    GraphicsPath p;
+    RRPath(p, r, rad);
+    Pen pen(c, w);
+    g.DrawPath(&pen, &p);
+}
+static bool IsLightColor(COLORREF c) { return (GetRValue(c) * 299 + GetGValue(c) * 587 + GetBValue(c) * 114) / 1000 > 150; }
+
+// Boutons et interrupteurs (BS_OWNERDRAW)
+static void OnDrawItem(DRAWITEMSTRUCT* d) {
+    if (d->CtlType != ODT_BUTTON) return;
+    HDC hdc = d->hDC;
+    RECT rc = d->rcItem;
+    FillRect(hdc, &rc, g_brBg);
+    HGDIOBJ oldF = SelectObject(hdc, g_font);
+    {
+        Graphics g(hdc);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+        Font f(hdc);
+        wchar_t txt[256] = {};
+        GetWindowTextW(d->hwndItem, txt, 256);
+        const bool dis = (d->itemState & ODS_DISABLED) != 0, sel = (d->itemState & ODS_SELECTED) != 0,
+                   foc = (d->itemState & ODS_FOCUS) != 0;
+        const float S = A.g.S;
+        RectF r((float)rc.left, (float)rc.top, (float)(rc.right - rc.left), (float)(rc.bottom - rc.top));
+        if (IsSwitchId((int)d->CtlID)) {
+            bool on = ChkGet(d->hwndItem);
+            float pw = 38 * S, ph = 20 * S, py = r.Y + (r.Height - ph) / 2;
+            RectF pill(r.X + 1, py, pw, ph);
+            FillRR(g, pill, ph / 2, on ? Gc(g_cAccent) : Gc(Mix(g_cBg, g_cText, 22)));
+            float kd = ph - 6 * S;
+            SolidBrush kb(on ? (IsLightColor(g_cAccent) ? Color(255, 20, 20, 24) : Color(255, 255, 255, 255)) : Gc(g_cMuted));
+            g.FillEllipse(&kb, pill.X + (on ? pw - kd - 3 * S : 3 * S), py + 3 * S, kd, kd);
+            if (foc) StrokeRR(g, RectF(pill.X - 2, pill.Y - 2, pill.Width + 4, pill.Height + 4), ph / 2 + 2, Gc(g_cAccent, 140), 1.0f);
+            DrawTxt(g, txt, f, RectF(r.X + pw + 12 * S, r.Y, r.Width - pw - 12 * S, r.Height), Gc(dis ? g_cMuted : g_cText));
+        } else {
+            const bool primary = (int)d->CtlID == IDC_U_UPDATE;
+            RectF b(r.X + 0.5f, r.Y + 0.5f, r.Width - 1, r.Height - 1);
+            COLORREF fill = primary ? g_cAccent : Mix(g_cPanel, g_cText, sel ? 20 : 6);
+            COLORREF txtc = primary ? (IsLightColor(g_cAccent) ? RGB(20, 20, 24) : RGB(255, 255, 255)) : g_cText;
+            if (dis) { fill = g_cPanel; txtc = g_cMuted; }
+            FillRR(g, b, 7 * S, Gc(fill));
+            StrokeRR(g, b, 7 * S, foc ? Gc(g_cAccent) : Gc(Mix(g_cPanel, g_cText, 16)), 1.0f);
+            DrawTxt(g, txt, f, b, Gc(txtc), StringAlignmentCenter, StringAlignmentCenter);
+        }
+    }
+    SelectObject(hdc, oldF);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Barre latérale
+// ---------------------------------------------------------------------------------------------
+static const wchar_t* kNavGlyph[kPages] = {L"", L"", L"", L"", L""};
+static void ShowPage(int navIdx);
+
+static std::wstring NavLabel(int i) {
+    const wchar_t* n[kPages] = {T(L"Thèmes", L"Themes"), T(L"Apparence", L"Appearance"), T(L"Comportement", L"Behavior"),
+                                T(L"Éléments", L"Items"), T(L"Mise à jour", L"Update")};
+    return n[i];
+}
+static RectF NavItemRect(int i) {
+    const float S = A.g.S;
+    return RectF(12 * S, (84 + i * 46) * S, 166 * S, 40 * S);
+}
+static LRESULT CALLBACK NavProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_ERASEBKGND: return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(h, &ps);
+            RECT cr;
+            GetClientRect(h, &cr);
+            HDC mem = CreateCompatibleDC(dc);
+            HBITMAP bm = CreateCompatibleBitmap(dc, cr.right, cr.bottom);
+            HGDIOBJ old = SelectObject(mem, bm);
+            {
+                Graphics g(mem);
+                g.SetSmoothingMode(SmoothingModeAntiAlias);
+                g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+                const float S = A.g.S;
+                SolidBrush bg(Gc(g_cPanel));
+                g.FillRectangle(&bg, 0, 0, cr.right, cr.bottom);
+                FontFamily ff(L"Segoe UI"), fi(L"Segoe MDL2 Assets");
+                Font fTitle(&ff, 17 * S, FontStyleBold, UnitPixel), fSub(&ff, 11 * S, FontStyleRegular, UnitPixel),
+                    fItem(&ff, 14 * S, FontStyleRegular, UnitPixel), fIcon(&fi, 17 * S, FontStyleRegular, UnitPixel);
+                DrawTxt(g, L"RocketDock", fTitle, RectF(24 * S, 20 * S, 160 * S, 26 * S), Gc(g_cText));
+                DrawTxt(g, L"Modern  ·  " + std::wstring(T(L"Paramètres", L"Settings")), fSub,
+                        RectF(24 * S, 46 * S, 160 * S, 20 * S), Gc(g_cMuted));
+                for (int i = 0; i < kPages; ++i) {
+                    RectF r = NavItemRect(i);
+                    bool sel = i == g_navSel, hot = i == g_navHot;
+                    if (sel) {
+                        FillRR(g, r, 9 * S, Gc(g_cAccent, 46));
+                        FillRR(g, RectF(r.X, r.Y + 9 * S, 3.5f * S, r.Height - 18 * S), 2 * S, Gc(g_cAccent));
+                    } else if (hot) {
+                        FillRR(g, r, 9 * S, Gc(g_cText, 18));
+                    }
+                    Color tc = sel ? Gc(g_cText) : Gc(Mix(g_cMuted, g_cText, hot ? 55 : 15));
+                    DrawTxt(g, kNavGlyph[i], fIcon, RectF(r.X + 12 * S, r.Y, 28 * S, r.Height), sel ? Gc(g_cAccent) : tc,
+                            StringAlignmentCenter);
+                    DrawTxt(g, NavLabel(i), fItem, RectF(r.X + 48 * S, r.Y, r.Width - 52 * S, r.Height), tc);
+                }
+                DrawTxt(g, L"v" + std::wstring(kVersionW), fSub, RectF(24 * S, cr.bottom - 36 * S, 150 * S, 20 * S), Gc(g_cMuted));
+            }
+            BitBlt(dc, 0, 0, cr.right, cr.bottom, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, old);
+            DeleteObject(bm);
+            DeleteDC(mem);
+            EndPaint(h, &ps);
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            int hot = -1;
+            float x = (float)(short)LOWORD(lp), y = (float)(short)HIWORD(lp);
+            for (int i = 0; i < kPages; ++i)
+                if (NavItemRect(i).Contains(x, y)) hot = i;
+            if (hot != g_navHot) { g_navHot = hot; InvalidateRect(h, nullptr, FALSE); }
+            TRACKMOUSEEVENT te = {sizeof(te), TME_LEAVE, h, 0};
+            TrackMouseEvent(&te);
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            if (g_navHot != -1) { g_navHot = -1; InvalidateRect(h, nullptr, FALSE); }
+            return 0;
+        case WM_SETCURSOR:
+            SetCursor(LoadCursorW(nullptr, g_navHot >= 0 ? IDC_HAND : IDC_ARROW));
+            return TRUE;
+        case WM_LBUTTONDOWN:
+            if (g_navHot >= 0) ShowPage(g_navHot);
+            return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Galerie de thèmes
+// ---------------------------------------------------------------------------------------------
+struct GalCard {
+    ThemeInfo ti;
+    Theme th;
+    Bitmap* ic[5] = {};
+    RectF r;
+};
+struct GalHdr {
+    std::wstring text;
+    float y;
+};
+static std::vector<GalCard> g_cards;
+static std::vector<GalHdr> g_hdrs;
+static float g_galH = 0;
+static int g_galScroll = 0, g_galHot = -1;
+static HWND g_gal = nullptr;
+
+static void GalFree() {
+    for (auto& c : g_cards)
+        for (auto*& b : c.ic) { delete b; b = nullptr; }
+    g_cards.clear();
+    g_hdrs.clear();
+}
+static Bitmap* LoadIcon64(const std::wstring& p) {
+    if (!PathFileExistsW(p.c_str())) return nullptr;
+    Bitmap src(p.c_str());
+    if (src.GetLastStatus() != Ok) return nullptr;
+    Bitmap* o = new Bitmap(64, 64, PixelFormat32bppPARGB);
+    Graphics g(o);
+    g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+    g.Clear(Color(0, 0, 0, 0));
+    g.DrawImage(&src, Rect(0, 0, 64, 64));
+    return o;
+}
+static void GalLayout() {
+    if (!g_gal) return;
+    RECT cr;
+    GetClientRect(g_gal, &cr);
+    const float S = A.g.S;
+    float W = (float)cr.right, margin = 24 * S, gap = 16 * S, cardH = 178 * S, hdrH = 42 * S;
+    int cols = std::max(1, (int)((W - 2 * margin + gap) / (210 * S + gap)));
+    float cw = (W - 2 * margin - (cols - 1) * gap) / cols;
+    g_hdrs.clear();
+    std::wstring last;
+    float y = 6 * S;
+    int col = 0;
+    for (auto& c : g_cards) {
+        std::wstring cat = Lower(c.ti.category);
+        if (cat != last) {
+            if (col > 0) { y += cardH + gap; col = 0; }
+            last = cat;
+            g_hdrs.push_back({CategoryLabel(c.ti.category), y});
+            y += hdrH;
+        }
+        c.r = RectF(margin + col * (cw + gap), y, cw, cardH);
+        if (++col >= cols) { col = 0; y += cardH + gap; }
+    }
+    if (col > 0) y += cardH + gap;
+    g_galH = y + 10 * S;
+    SCROLLINFO si = {sizeof(si), SIF_RANGE | SIF_PAGE | SIF_POS};
+    si.nMin = 0;
+    si.nMax = (int)g_galH;
+    si.nPage = cr.bottom;
+    g_galScroll = std::max(0, std::min(g_galScroll, std::max(0, (int)g_galH - (int)cr.bottom)));
+    si.nPos = g_galScroll;
+    SetScrollInfo(g_gal, SB_VERT, &si, TRUE);
+    InvalidateRect(g_gal, nullptr, FALSE);
+}
+static void GalRebuild() {
+    GalFree();
+    for (const ThemeInfo& ti : EnumThemes()) {
+        GalCard c;
+        c.ti = ti;
+        c.th = LoadThemeEx(ti.folder, false);
+        std::wstring cat = Lower(ti.category);
+        const wchar_t* k3 = cat == L"ia" ? L"ai" : (cat == L"games" ? L"games" : L"terminal");
+        const wchar_t* k4 = cat == L"ia" ? L"chat" : (cat == L"games" ? L"music" : L"browser");
+        const wchar_t* keys[5] = {L"computer", L"folder", k3, k4, L"settings"};
+        for (int i = 0; i < 5; ++i)
+            c.ic[i] = LoadIcon64(ThemesRoot() + L"\\" + ti.folder + L"\\Icons\\" + keys[i] + L".png");
+        g_cards.push_back(std::move(c));
+    }
+    GalLayout();
+}
+static void GalPaintCard(Graphics& g, const GalCard& c, bool hot, bool active) {
+    const float S = A.g.S;
+    RectF r = c.r;
+    FillRR(g, r, 12 * S, Gc(Mix(g_cPanel, g_cText, hot ? 8 : 0)));
+    if (active) StrokeRR(g, RectF(r.X + 1, r.Y + 1, r.Width - 2, r.Height - 2), 12 * S, Gc(g_cAccent), 2.2f * S);
+    else StrokeRR(g, RectF(r.X + 0.5f, r.Y + 0.5f, r.Width - 1, r.Height - 1), 12 * S, Gc(Mix(g_cPanel, g_cText, hot ? 30 : 12)), 1.0f);
+    // aperçu : fond de bureau + barre du thème
+    RectF pv(r.X + 10 * S, r.Y + 10 * S, r.Width - 20 * S, 82 * S);
+    const Theme& t = c.th;
+    {
+        GraphicsPath pp;
+        RRPath(pp, pv, 8 * S);
+        LinearGradientBrush bgb(PointF(pv.X, pv.Y), PointF(pv.X + pv.Width, pv.Y + pv.Height), Color(255, t.uiBg.GetR(), t.uiBg.GetG(), t.uiBg.GetB()),
+                                Color(255, (BYTE)std::min(255, t.uiBg.GetR() + 30), (BYTE)std::min(255, t.uiBg.GetG() + 30), (BYTE)std::min(255, t.uiBg.GetB() + 40)));
+        g.FillPath(&bgb, &pp);
+    }
+    RectF bar(pv.X + 10 * S, pv.Y + (pv.Height - 50 * S) / 2 + 6 * S, pv.Width - 20 * S, 50 * S);
+    {
+        float rad = std::min(bar.Height * t.cornerR, bar.Height / 2);
+        GraphicsPath bp;
+        RRPath(bp, bar, rad);
+        LinearGradientBrush gb(PointF(bar.X, bar.Y), PointF(bar.X, bar.Y + bar.Height), Color(255, t.barTop.GetR(), t.barTop.GetG(), t.barTop.GetB()),
+                               Color(255, t.barBot.GetR(), t.barBot.GetG(), t.barBot.GetB()));
+        if (t.glow.GetR() || t.glow.GetG() || t.glow.GetB()) {
+            RectF gl(bar.X - 2 * S, bar.Y - 2 * S, bar.Width + 4 * S, bar.Height + 4 * S);
+            StrokeRR(g, gl, rad + 2 * S, Color(60, t.glow.GetR(), t.glow.GetG(), t.glow.GetB()), 3 * S);
+        }
+        g.FillPath(&gb, &bp);
+        Pen pen(Color(210, t.border1.GetR(), t.border1.GetG(), t.border1.GetB()), std::max(0.8f, t.borderW * S * 0.8f));
+        g.DrawPath(&pen, &bp);
+    }
+    float pad = 10 * S, gap = 4 * S;
+    float isz = std::min(34 * S, (bar.Width - 2 * pad - 4 * gap) / 5);
+    float ix = bar.X + (bar.Width - (5 * isz + 4 * gap)) / 2, iy = bar.Y + (bar.Height - isz) / 2;
+    g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+    for (int i = 0; i < 5; ++i) {
+        float x = ix + i * (isz + gap);
+        if (c.ic[i]) g.DrawImage(c.ic[i], RectF(x, iy, isz, isz), 0, 0, 64, 64, UnitPixel);
+        else FillRR(g, RectF(x, iy, isz, isz), 7 * S, Color(120, t.accent.GetR(), t.accent.GetG(), t.accent.GetB()));
+    }
+    FontFamily ff(L"Segoe UI"), fi(L"Segoe MDL2 Assets");
+    Font fName(&ff, 15 * S, FontStyleBold, UnitPixel), fDesc(&ff, 11.5f * S, FontStyleRegular, UnitPixel);
+    DrawTxt(g, c.ti.name, fName, RectF(r.X + 12 * S, r.Y + 98 * S, r.Width - 48 * S, 22 * S), Gc(g_cText));
+    DrawTxt(g, c.ti.desc, fDesc, RectF(r.X + 12 * S, r.Y + 122 * S, r.Width - 24 * S, 50 * S), Gc(g_cMuted),
+            StringAlignmentNear, StringAlignmentNear, true);
+    if (active) {
+        float d = 22 * S;
+        RectF bd(r.X + r.Width - d - 10 * S, r.Y + 98 * S, d, d);
+        SolidBrush ab(Gc(g_cAccent));
+        g.FillEllipse(&ab, bd);
+        Font fck(&fi, 12 * S, FontStyleRegular, UnitPixel);
+        DrawTxt(g, L"", fck, bd, IsLightColor(g_cAccent) ? Color(255, 20, 20, 24) : Color(255, 255, 255, 255),
+                StringAlignmentCenter);
+    }
+}
+static int GalHit(int x, int y) {
+    for (size_t i = 0; i < g_cards.size(); ++i)
+        if (g_cards[i].r.Contains((float)x, (float)(y + g_galScroll))) return (int)i;
+    return -1;
+}
+static void GalScrollTo(int pos) {
+    RECT cr;
+    GetClientRect(g_gal, &cr);
+    pos = std::max(0, std::min(pos, std::max(0, (int)g_galH - (int)cr.bottom)));
+    if (pos == g_galScroll) return;
+    g_galScroll = pos;
+    SetScrollPos(g_gal, SB_VERT, pos, TRUE);
+    InvalidateRect(g_gal, nullptr, FALSE);
+}
+static LRESULT CALLBACK GalProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_ERASEBKGND: return 1;
+        case WM_SIZE: GalLayout(); return 0;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(h, &ps);
+            RECT cr;
+            GetClientRect(h, &cr);
+            HDC mem = CreateCompatibleDC(dc);
+            HBITMAP bm = CreateCompatibleBitmap(dc, cr.right, cr.bottom);
+            HGDIOBJ old = SelectObject(mem, bm);
+            {
+                Graphics g(mem);
+                g.SetSmoothingMode(SmoothingModeAntiAlias);
+                g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+                SolidBrush bg(Gc(g_cBg));
+                g.FillRectangle(&bg, 0, 0, cr.right, cr.bottom);
+                g.TranslateTransform(0, (REAL)-g_galScroll);
+                const float S = A.g.S;
+                FontFamily ff(L"Segoe UI");
+                Font fH(&ff, 13 * S, FontStyleBold, UnitPixel);
+                for (auto& hd : g_hdrs) {
+                    DrawTxt(g, hd.text, fH, RectF(24 * S, hd.y + 6 * S, 400 * S, 24 * S), Gc(g_cAccent));
+                    Pen lp2(Gc(g_cText, 26), 1.0f);
+                    g.DrawLine(&lp2, (REAL)(24 * S + 110 * S), (REAL)(hd.y + 19 * S), (REAL)(cr.right - 24 * S), (REAL)(hd.y + 19 * S));
+                }
+                for (size_t i = 0; i < g_cards.size(); ++i) {
+                    const GalCard& c = g_cards[i];
+                    if (c.r.Y + c.r.Height < g_galScroll || c.r.Y > g_galScroll + cr.bottom) continue;
+                    GalPaintCard(g, c, (int)i == g_galHot, Lower(c.ti.folder) == Lower(A.set.theme));
+                }
+            }
+            BitBlt(dc, 0, 0, cr.right, cr.bottom, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, old);
+            DeleteObject(bm);
+            DeleteDC(mem);
+            EndPaint(h, &ps);
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            int hot = GalHit((short)LOWORD(lp), (short)HIWORD(lp));
+            if (GetFocus() != h) SetFocus(h);
+            if (hot != g_galHot) { g_galHot = hot; InvalidateRect(h, nullptr, FALSE); }
+            TRACKMOUSEEVENT te = {sizeof(te), TME_LEAVE, h, 0};
+            TrackMouseEvent(&te);
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            if (g_galHot != -1) { g_galHot = -1; InvalidateRect(h, nullptr, FALSE); }
+            return 0;
+        case WM_SETCURSOR:
+            SetCursor(LoadCursorW(nullptr, g_galHot >= 0 ? IDC_HAND : IDC_ARROW));
+            return TRUE;
+        case WM_LBUTTONUP: {
+            int i = GalHit((short)LOWORD(lp), (short)HIWORD(lp));
+            if (i >= 0 && i < (int)g_cards.size() && Lower(g_cards[i].ti.folder) != Lower(A.set.theme))
+                ApplyTheme(g_cards[i].ti.folder);
+            return 0;
+        }
+        case WM_MOUSEWHEEL:
+            GalScrollTo(g_galScroll - (int)((short)HIWORD(wp) * (int)(60 * A.g.S) / WHEEL_DELTA));
+            return 0;
+        case WM_VSCROLL: {
+            RECT cr;
+            GetClientRect(h, &cr);
+            int pos = g_galScroll;
+            switch (LOWORD(wp)) {
+                case SB_LINEUP: pos -= SC(40); break;
+                case SB_LINEDOWN: pos += SC(40); break;
+                case SB_PAGEUP: pos -= cr.bottom; break;
+                case SB_PAGEDOWN: pos += cr.bottom; break;
+                case SB_THUMBTRACK:
+                case SB_THUMBPOSITION: pos = HIWORD(wp); break;
+            }
+            GalScrollTo(pos);
+            return 0;
+        }
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Pages
 // ---------------------------------------------------------------------------------------------
 static LRESULT CALLBACK PageProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_COMMAND:
         case WM_HSCROLL:
         case WM_NOTIFY:
+        case WM_DRAWITEM:
             return SendMessageW(GetParent(h), msg, wp, lp);
-        case WM_CTLCOLORSTATIC:
-        case WM_CTLCOLORBTN: {
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX: {
             HDC dc = (HDC)wp;
-            SetBkColor(dc, GetSysColor(COLOR_WINDOW));
-            return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+            SetTextColor(dc, g_cText);
+            SetBkColor(dc, g_cPanel);
+            return (LRESULT)g_brPanel;
+        }
+        case WM_CTLCOLORSTATIC: {
+            HDC dc = (HDC)wp;
+            int id = GetDlgCtrlID((HWND)lp);
+            if (id == IDC_U_LOG) {
+                SetTextColor(dc, g_cText);
+                SetBkColor(dc, g_cPanel);
+                return (LRESULT)g_brPanel;
+            }
+            SetTextColor(dc, id == IDC_HINT ? g_cMuted : g_cText);
+            SetBkColor(dc, g_cBg);
+            return (LRESULT)g_brBg;
+        }
+        case WM_CTLCOLORBTN: {
+            SetBkColor((HDC)wp, g_cBg);
+            return (LRESULT)g_brBg;
         }
         case WM_ERASEBKGND: {
             RECT r;
             GetClientRect(h, &r);
-            FillRect((HDC)wp, &r, GetSysColorBrush(COLOR_WINDOW));
+            FillRect((HDC)wp, &r, g_brBg);
             return 1;
         }
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
 
+static void BuildPageThemes(HWND p) {
+    g_dx = 0; g_dy = 0;
+    HWND hd = Mk(p, L"STATIC", T(L"Thèmes", L"Themes"), SS_LEFT, 24, 16, 400, 34, IDC_HDR);
+    if (g_fontH) SendMessageW(hd, WM_SETFONT, (WPARAM)g_fontH, TRUE);
+    Hint(p, T(L"Un clic applique le thème : barre, icônes et cette fenêtre changent aussitôt.",
+              L"One click applies the theme: dock bar, icons and this window update at once."),
+         24, 52, 560, 20);
+    Btn(p, T(L"Dossier Themes", L"Themes folder"), 452, 14, 130, IDC_GAL_FOLDER, 30);
+    Btn(p, T(L"Actualiser", L"Refresh"), 588, 14, 100, IDC_GAL_REFRESH, 30);
+    g_gal = CreateWindowExW(0, L"RDMGallery", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPSIBLINGS, 0, SC(84), SC(710), SC(620 - 84),
+                            p, (HMENU)(INT_PTR)IDC_GAL, A.hInst, nullptr);
+}
+
+static void ShowPage(int navIdx) {
+    if (navIdx < 0 || navIdx >= kPages) return;
+    g_navSel = navIdx;
+    for (int i = 0; i < kPages; ++i) ShowWindow(g_pg[i], kNavPage[navIdx] == i ? SW_SHOW : SW_HIDE);
+    if (g_nav) InvalidateRect(g_nav, nullptr, FALSE);
+}
+
+static void Header(HWND p, const wchar_t* title) {
+    g_dx = 0; g_dy = 0;
+    HWND h = Mk(p, L"STATIC", title, SS_LEFT, 24, 16, 560, 34, IDC_HDR);
+    if (g_fontH) SendMessageW(h, WM_SETFONT, (WPARAM)g_fontH, TRUE);
+    g_dx = 24; g_dy = 64;
+}
+
 static void BuildPageAppearance(HWND p) {
+    Header(p, T(L"Apparence", L"Appearance"));
     Lbl(p, T(L"Position à l'écran", L"Screen position"), 14, 18, 170);
     Cmb(p, 190, 14, 200, IDC_POS, {T(L"Haut", L"Top"), T(L"Gauche", L"Left"), T(L"Bas", L"Bottom"), T(L"Droite", L"Right")});
     Lbl(p, T(L"Thème", L"Theme"), 14, 52, 170);
-    Cmb(p, 190, 48, 200, IDC_THEME, {T(L"Sombre", L"Dark"), T(L"Clair", L"Light"), T(L"Aurore", L"Aurora")});
+    Cmb(p, 190, 48, 290, IDC_THEME, {});
     Lbl(p, T(L"Écran", L"Display"), 14, 86, 170);
     HWND mc = Cmb(p, 190, 82, 200, IDC_MON, {});
     std::vector<MONITORINFO> mons;
@@ -450,6 +957,7 @@ static void BuildPageAppearance(HWND p) {
 }
 
 static void BuildPageBehavior(HWND p) {
+    Header(p, T(L"Comportement", L"Behavior"));
     Chk(p, T(L"Masquer automatiquement le dock", L"Auto-hide the dock"), 14, 14, 420, IDC_AUTOHIDE);
     Chk(p, T(L"Afficher le nom des icônes au survol", L"Show icon labels on hover"), 14, 42, 420, IDC_SHOWLABELS);
     Chk(p, T(L"Verrouiller les icônes (pas de déplacement)", L"Lock icons (no dragging)"), 14, 70, 420, IDC_LOCK);
@@ -460,12 +968,12 @@ static void BuildPageBehavior(HWND p) {
     Lbl(p, T(L"Raccourci afficher / masquer", L"Show / hide shortcut"), 14, 240, 175);
     Edt(p, 190, 236, 170, IDC_HOTKEY);
     Btn(p, T(L"Appliquer", L"Apply"), 370, 235, 100, IDC_HKAPPLY);
-    Lbl(p, T(L"Exemples : Control+Alt+R, Win+F9, Shift+Alt+D", L"Examples: Control+Alt+R, Win+F9, Shift+Alt+D"), 190, 266, 400);
+    Hint(p, T(L"Exemples : Control+Alt+R, Win+F9, Shift+Alt+D", L"Examples: Control+Alt+R, Win+F9, Shift+Alt+D"), 190, 266, 400);
 }
 
 static void BuildPageItems(HWND p) {
-    HWND lv = Mk(p, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_TABSTOP, 12, 10, 590, 170, IDC_LIST,
-                 WS_EX_CLIENTEDGE);
+    Header(p, T(L"Éléments du dock", L"Dock items"));
+    HWND lv = Mk(p, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_TABSTOP, 12, 10, 590, 170, IDC_LIST);
     SendMessageW(lv, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
     LVCOLUMNW c = {};
     c.mask = LVCF_TEXT | LVCF_WIDTH;
@@ -488,20 +996,21 @@ static void BuildPageItems(HWND p) {
     Lbl(p, T(L"Fenêtre", L"Window"), 14, 386, 100);
     Cmb(p, 120, 382, 200, IDC_E_SHOW, {T(L"Normale", L"Normal"), T(L"Réduite", L"Minimized"), T(L"Agrandie", L"Maximized")});
     Btn(p, T(L"Appliquer à l'élément", L"Apply to item"), 440, 380, 162, IDC_APPLYITEM);
-    Lbl(p, T(L"Icône vide = icône du programme. Tuile générée : glyph:E8B7:F6B04A:E3801C", L"Empty icon = program icon. Generated tile: glyph:E8B7:F6B04A:E3801C"),
+    Hint(p, T(L"Icône vide = icône du programme. Icône du thème : theme:folder.  Tuile : glyph:E8B7:F6B04A:E3801C", L"Empty icon = program icon. Theme icon: theme:folder. Tile: glyph:E8B7:F6B04A:E3801C"),
         120, 412, 482, 36);
 }
 
 static void BuildPageUpdate(HWND p) {
+    Header(p, T(L"Mise à jour", L"Update"));
     Lbl(p, T(L"Version installée", L"Installed version"), 14, 18, 170);
     Lbl(p, kVersionW, 190, 18, 200);
     Lbl(p, T(L"Version disponible", L"Available version"), 14, 46, 170);
     Mk(p, L"STATIC", L"—", SS_LEFT, 190, 46, 300, 20, IDC_U_REMOTE);
-    Btn(p, T(L"Vérifier", L"Check"), 14, 82, 130, IDC_U_CHECK, 30);
+    Btn(p, T(L"Vérifier", L"Check"), 14, 82, 130, IDC_U_CHECK, 32);
     Btn(p, T(L"Mettre à jour maintenant", L"Update now"), 152, 82, 230, IDC_U_UPDATE, 30);
     Btn(p, T(L"Ouvrir le dossier", L"Open folder"), 390, 82, 140, IDC_U_FOLDER, 30);
-    Mk(p, L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, 14, 126, 580, 150, IDC_U_LOG, WS_EX_CLIENTEDGE);
-    Lbl(p, T(L"La mise à jour télécharge les fichiers depuis GitHub (agentia-GIT/Windows-Dock) et remplace l'exécutable et les "
+    Mk(p, L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, 14, 126, 620, 150, IDC_U_LOG);
+    Hint(p, T(L"La mise à jour télécharge les fichiers depuis GitHub (agentia-GIT/Windows-Dock) et remplace l'exécutable et les "
              L"fichiers listés dans manifest.txt. Settings.ini n'est jamais modifié : toute votre configuration est conservée. "
              L"Le dock redémarre ensuite automatiquement.",
              L"The update downloads files from GitHub (agentia-GIT/Windows-Dock) and replaces the executable and the files "
@@ -518,21 +1027,7 @@ static void LogUpd(const std::wstring& s) {
     SendMessageW(e, EM_REPLACESEL, FALSE, (LPARAM)l.c_str());
 }
 
-static void ShowPage(int idx) {
-    for (int i = 0; i < 4; ++i) ShowWindow(g_pg[i], i == idx ? SW_SHOW : SW_HIDE);
-}
 
-static void LayoutPages(HWND h) {
-    RECT r;
-    GetWindowRect(g_tab, &r);
-    MapWindowPoints(nullptr, h, (POINT*)&r, 2);
-    TabCtrl_AdjustRect(g_tab, FALSE, &r);
-    for (int i = 0; i < 4; ++i) MoveWindow(g_pg[i], r.left, r.top, r.right - r.left, r.bottom - r.top, TRUE);
-}
-
-// ---------------------------------------------------------------------------------------------
-// Traitement des commandes
-// ---------------------------------------------------------------------------------------------
 static void ApplyIconOpacity() {
     if (!A.ia) return;
     if (A.set.iconOpacity >= 100) A.ia->ClearColorMatrix();
@@ -572,6 +1067,7 @@ static void OnCommand(HWND h, int id, int code, HWND ctl) {
     HWND b = g_pg[1], it = g_pg[2];
     Settings& s = A.set;
     wchar_t buf[2048];
+    if (IsSwitchId(id) && code == BN_CLICKED) ChkSet(ctl, !ChkGet(ctl));
     switch (id) {
         case IDC_POS:
             if (code == CBN_SELCHANGE) { s.side = (int)SendMessageW(ctl, CB_GETCURSEL, 0, 0); RecalcGeometry(); SaveSettings(); }
@@ -579,7 +1075,7 @@ static void OnCommand(HWND h, int id, int code, HWND ctl) {
         case IDC_THEME:
             if (code == CBN_SELCHANGE) {
                 int i = (int)SendMessageW(ctl, CB_GETCURSEL, 0, 0);
-                if (i >= 0 && i < 3) { s.theme = kThemes[i]; A.th = MakeTheme(s.theme); ApplyMenuTheme(); A.dirty = true; SaveSettings(); }
+                if (i >= 0 && i < (int)g_setThemes.size()) ApplyTheme(g_setThemes[i].folder);
             }
             break;
         case IDC_MON:
@@ -592,12 +1088,12 @@ static void OnCommand(HWND h, int id, int code, HWND ctl) {
                 if (!f.empty() && f != s.fontName) { s.fontName = f; RecalcGeometry(); SaveSettings(); }
             }
             break;
-        case IDC_AUTOHIDE: s.autoHide = SendMessageW(ctl, BM_GETCHECK, 0, 0) == BST_CHECKED; RecalcGeometry(); SaveSettings(); break;
-        case IDC_SHOWLABELS: s.hideLabels = SendMessageW(ctl, BM_GETCHECK, 0, 0) != BST_CHECKED; A.dirty = true; SaveSettings(); break;
-        case IDC_LOCK: s.lockIcons = SendMessageW(ctl, BM_GETCHECK, 0, 0) == BST_CHECKED; SaveSettings(); break;
-        case IDC_RUNNING: s.showRunning = SendMessageW(ctl, BM_GETCHECK, 0, 0) == BST_CHECKED; A.dirty = true; SaveSettings(); break;
-        case IDC_OPENRUN: s.openRunning = SendMessageW(ctl, BM_GETCHECK, 0, 0) == BST_CHECKED; SaveSettings(); break;
-        case IDC_AUTOSTART: AutostartSet(SendMessageW(ctl, BM_GETCHECK, 0, 0) == BST_CHECKED); break;
+        case IDC_AUTOHIDE: s.autoHide = ChkGet(ctl); RecalcGeometry(); SaveSettings(); break;
+        case IDC_SHOWLABELS: s.hideLabels = !ChkGet(ctl); A.dirty = true; SaveSettings(); break;
+        case IDC_LOCK: s.lockIcons = ChkGet(ctl); SaveSettings(); break;
+        case IDC_RUNNING: s.showRunning = ChkGet(ctl); A.dirty = true; SaveSettings(); break;
+        case IDC_OPENRUN: s.openRunning = ChkGet(ctl); SaveSettings(); break;
+        case IDC_AUTOSTART: AutostartSet(ChkGet(ctl)); break;
         case IDC_HKAPPLY: {
             GetDlgItemTextW(b, IDC_HOTKEY, buf, 256);
             std::wstring hk = Trim(buf);
@@ -695,22 +1191,69 @@ static void OnCommand(HWND h, int id, int code, HWND ctl) {
             }
             break;
         case IDC_U_FOLDER: ShellExecuteW(nullptr, L"open", ExeDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
+        case IDC_GAL_FOLDER: {
+            CreateDirectoryW(ThemesRoot().c_str(), nullptr);
+            ShellExecuteW(nullptr, L"open", ThemesRoot().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            break;
+        }
+        case IDC_GAL_REFRESH: GalRebuild(); FillThemeCombo(); break;
         case IDC_CLOSE: DestroyWindow(h); break;
     }
 }
 
+static BOOL CALLBACK StyleChild(HWND c, LPARAM) {
+    wchar_t cls[64] = {};
+    GetClassNameW(c, cls, 64);
+    if (!wcscmp(cls, L"ComboBox")) {
+        SetWindowTheme(c, g_uiDark ? L"DarkMode_CFD" : L"CFD", nullptr);
+    } else if (!wcscmp(cls, L"SysListView32")) {
+        SetWindowTheme(c, g_uiDark ? L"DarkMode_ItemsView" : L"Explorer", nullptr);
+        ListView_SetBkColor(c, g_cPanel);
+        ListView_SetTextBkColor(c, g_cPanel);
+        ListView_SetTextColor(c, g_cText);
+    } else if (!wcscmp(cls, L"msctls_trackbar32") || !wcscmp(cls, L"RDMGallery")) {
+        SetWindowTheme(c, g_uiDark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+    } else if (!wcscmp(cls, L"Edit") && GetDlgCtrlID(c) == IDC_U_LOG) {
+        SetWindowTheme(c, g_uiDark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+    }
+    return TRUE;
+}
+
+// Appelée après tout changement de thème : couleurs, barre de titre, contrôles, galerie.
+static void RefreshSettingsTheme() {
+    if (!g_setWnd) return;
+    UpdateUiColors();
+    BOOL d = g_uiDark ? TRUE : FALSE;
+    DwmSetWindowAttribute(g_setWnd, 20, &d, sizeof(d));
+    DwmSetWindowAttribute(g_setWnd, 19, &d, sizeof(d));
+    COLORREF cap = g_cBg, txt = g_cText;
+    DwmSetWindowAttribute(g_setWnd, 35, &cap, sizeof(cap));  // couleur de barre de titre (Windows 11)
+    DwmSetWindowAttribute(g_setWnd, 36, &txt, sizeof(txt));
+    EnumChildWindows(g_setWnd, StyleChild, 0);
+    FillThemeCombo();
+    RedrawWindow(g_setWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
+}
+
 static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+        case WM_ERASEBKGND: {
+            RECT r;
+            GetClientRect(h, &r);
+            FillRect((HDC)wp, &r, g_brBg);
+            return 1;
+        }
         case WM_COMMAND:
             OnCommand(h, LOWORD(wp), HIWORD(wp), (HWND)lp);
             return 0;
+        case WM_DRAWITEM:
+            OnDrawItem((DRAWITEMSTRUCT*)lp);
+            return TRUE;
         case WM_HSCROLL:
             OnSlider((HWND)lp, wp);
             return 0;
         case WM_NOTIFY: {
             NMHDR* n = (NMHDR*)lp;
-            if (n->idFrom == IDC_TAB && n->code == TCN_SELCHANGE) ShowPage(TabCtrl_GetCurSel(g_tab));
-            else if (n->idFrom == IDC_LIST && n->code == LVN_ITEMCHANGED && !g_filling) {
+            if (n->idFrom == IDC_LIST && n->code == LVN_ITEMCHANGED && !g_filling) {
                 NMLISTVIEW* nl = (NMLISTVIEW*)lp;
                 if ((nl->uChanged & LVIF_STATE) && (nl->uNewState & LVIS_SELECTED)) LoadFields();
             }
@@ -751,9 +1294,15 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_DESTROY:
             g_setWnd = nullptr;
-            g_tab = nullptr;
+            g_nav = nullptr;
+            g_gal = nullptr;
+            GalFree();
             for (auto& p : g_pg) p = nullptr;
             if (g_font) { DeleteObject(g_font); g_font = nullptr; }
+            if (g_fontH) { DeleteObject(g_fontH); g_fontH = nullptr; }
+            if (g_fontS) { DeleteObject(g_fontS); g_fontS = nullptr; }
+            if (g_brBg) { DeleteObject(g_brBg); g_brBg = nullptr; }
+            if (g_brPanel) { DeleteObject(g_brPanel); g_brPanel = nullptr; }
             return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
@@ -765,7 +1314,7 @@ static void OpenSettings() {
         SetForegroundWindow(g_setWnd);
         return;
     }
-    INITCOMMONCONTROLSEX ic = {sizeof(ic), ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES};
+    INITCOMMONCONTROLSEX ic = {sizeof(ic), ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES};
     InitCommonControlsEx(&ic);
     static bool reg = false;
     if (!reg) {
@@ -775,49 +1324,50 @@ static void OpenSettings() {
         wc.hInstance = A.hInst;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         wc.hIcon = LoadIconW(A.hInst, MAKEINTRESOURCEW(2));
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
         wc.lpfnWndProc = SettingsProc;
         wc.lpszClassName = L"RDMSettings";
         RegisterClassExW(&wc);
-        wc.lpfnWndProc = PageProc;
-        wc.hbrBackground = nullptr;
         wc.hIcon = nullptr;
+        wc.lpfnWndProc = PageProc;
         wc.lpszClassName = L"RDMPage";
         RegisterClassExW(&wc);
+        wc.lpfnWndProc = NavProc;
+        wc.lpszClassName = L"RDMNav";
+        RegisterClassExW(&wc);
+        wc.lpfnWndProc = GalProc;
+        wc.lpszClassName = L"RDMGallery";
+        RegisterClassExW(&wc);
     }
-    g_font = CreateFontW(-MulDiv(9, (int)(96 * A.g.S + 0.5f), 72), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
-                         CLEARTYPE_QUALITY, 0, L"Segoe UI");
-    RECT rc = {0, 0, SC(640), SC(580)};
+    UpdateUiColors();
+    const int dpi = (int)(96 * A.g.S + 0.5f);
+    g_font = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    g_fontH = CreateFontW(-MulDiv(19, dpi, 72), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI Semibold");
+    g_fontS = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    RECT rc = {0, 0, SC(900), SC(620)};
     DWORD style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
     AdjustWindowRectEx(&rc, style, FALSE, WS_EX_TOPMOST);
     int w = rc.right - rc.left, hgt = rc.bottom - rc.top;
     int sx = GetSystemMetrics(SM_CXSCREEN), sy = GetSystemMetrics(SM_CYSCREEN);
     std::wstring title = std::wstring(kAppName) + L" - " + T(L"Paramètres", L"Settings");
-    g_setWnd = CreateWindowExW(WS_EX_TOPMOST, L"RDMSettings", title.c_str(), style, (sx - w) / 2, (sy - hgt) / 2, w, hgt,
+    g_setWnd = CreateWindowExW(WS_EX_TOPMOST, L"RDMSettings", title.c_str(), style, (sx - w) / 2, std::max(0, (sy - hgt) / 2), w, hgt,
                                nullptr, nullptr, A.hInst, nullptr);
     if (!g_setWnd) return;
     HWND h = g_setWnd;
-    g_tab = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP, SC(8), SC(8), SC(624),
-                            SC(522), h, (HMENU)(INT_PTR)IDC_TAB, A.hInst, nullptr);
-    SendMessageW(g_tab, WM_SETFONT, (WPARAM)g_font, TRUE);
-    const wchar_t* names[] = {T(L"Apparence", L"Appearance"), T(L"Comportement", L"Behavior"), T(L"Éléments", L"Items"),
-                              T(L"Mise à jour", L"Update")};
-    for (int i = 0; i < 4; ++i) {
-        TCITEMW ti = {};
-        ti.mask = TCIF_TEXT;
-        ti.pszText = (LPWSTR)names[i];
-        SendMessageW(g_tab, TCM_INSERTITEMW, i, (LPARAM)&ti);
-        g_pg[i] = CreateWindowExW(0, L"RDMPage", L"", WS_CHILD | WS_CLIPCHILDREN, 0, 0, 10, 10, h, nullptr, A.hInst, nullptr);
-    }
+    g_nav = CreateWindowExW(0, L"RDMNav", L"", WS_CHILD | WS_VISIBLE, 0, 0, SC(190), SC(620), h, (HMENU)(INT_PTR)IDC_NAV, A.hInst, nullptr);
+    for (int i = 0; i < kPages; ++i)
+        g_pg[i] = CreateWindowExW(0, L"RDMPage", L"", WS_CHILD | WS_CLIPCHILDREN, SC(190), 0, SC(710), SC(620), h, nullptr, A.hInst, nullptr);
+    g_dx = g_dy = 0;
     BuildPageAppearance(g_pg[0]);
     BuildPageBehavior(g_pg[1]);
     BuildPageItems(g_pg[2]);
     BuildPageUpdate(g_pg[3]);
-    Btn(h, T(L"Fermer", L"Close"), 530, 540, 100, IDC_CLOSE, 28);
-    // le bouton Fermer est créé avec des coordonnées en pixels logiques par Btn()
-    LayoutPages(h);
-    ShowPage(0);
+    BuildPageThemes(g_pg[4]);
+    g_dx = g_dy = 0;
+    GalRebuild();
+    RefreshSettingsTheme();
     SyncControls();
+    g_navSel = 0;
+    ShowPage(0);
     ShowWindow(h, SW_SHOW);
     SetForegroundWindow(h);
 }
