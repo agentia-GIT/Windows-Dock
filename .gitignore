@@ -1,0 +1,6 @@
+build/
+*.pdb
+*.obj
+*.o
+# Configuration personnelle générée au lancement
+Settings.ini
