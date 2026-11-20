@@ -262,8 +262,88 @@ def pat_dither(ov, rng, c):
             d.rectangle((x, y, x + 7, y + 7), fill=(255, 255, 255, 26))
 
 
+
+def pat_matrix(ov, rng, c):
+    d = ImageDraw.Draw(ov)
+    for x in range(48, 480, 26):
+        y = rng.randrange(20, 200)
+        n = rng.randrange(5, 12)
+        for i in range(n):
+            a = int(40 + 190 * i / n)
+            d.rectangle((x, y + i * 24, x + 12, y + i * 24 + 16), fill=c + (a,))
+
+
+def pat_stars(ov, rng, c):
+    d = ImageDraw.Draw(ov)
+    for _ in range(70):
+        x, y = rng.randrange(30, 482), rng.randrange(30, 482)
+        r = rng.choice([2, 2, 3, 4])
+        d.ellipse((x - r, y - r, x + r, y + r), fill=(255, 255, 255, rng.randrange(110, 240)))
+    for _ in range(5):
+        x, y = rng.randrange(60, 450), rng.randrange(60, 450)
+        d.line([(x - 14, y), (x + 14, y)], fill=c + (200,), width=3)
+        d.line([(x, y - 14), (x, y + 14)], fill=c + (200,), width=3)
+    ov.alpha_composite(ov.filter(ImageFilter.GaussianBlur(5)))
+
+
+def pat_waves(ov, rng, c):
+    d = ImageDraw.Draw(ov)
+    for i in range(7):
+        pts = [(x, 90 + i * 55 + 18 * math.sin(x / 45.0 + i)) for x in range(0, W + 8, 8)]
+        d.line(pts, fill=c + (70,), width=6, joint="curve")
+
+
+def pat_hexgrid(ov, rng, c):
+    d = ImageDraw.Draw(ov)
+    r = 44
+    for row in range(-1, 9):
+        for col in range(-1, 8):
+            cx = col * r * 1.75 + (r * 0.875 if row % 2 else 0)
+            cy = row * r * 1.5
+            pts = [(cx + r * math.cos(math.radians(60 * k + 30)), cy + r * math.sin(math.radians(60 * k + 30))) for k in range(6)]
+            d.line(pts + [pts[0]], fill=c + (60,), width=3)
+
+
+def pat_stripes(ov, rng, c):
+    d = ImageDraw.Draw(ov)
+    for k in range(-512, 700, 70):
+        d.polygon([(k, W), (k + 34, W), (k + 34 + W, 0), (k + W, 0)], fill=c + (46,))
+
+
+def pat_bubbles(ov, rng, c):
+    d = ImageDraw.Draw(ov)
+    for _ in range(16):
+        x, y, r = rng.randrange(40, 470), rng.randrange(40, 470), rng.randrange(14, 46)
+        d.ellipse((x - r, y - r, x + r, y + r), outline=c + (120,), width=5)
+        d.ellipse((x - r * 0.5, y - r * 0.6, x - r * 0.15, y - r * 0.25), fill=(255, 255, 255, 140))
+
+
+def pat_snow(ov, rng, c):
+    d = ImageDraw.Draw(ov)
+    for _ in range(46):
+        x, y, r = rng.randrange(30, 482), rng.randrange(30, 482), rng.choice([3, 4, 6])
+        d.ellipse((x - r, y - r, x + r, y + r), fill=(255, 255, 255, rng.randrange(110, 230)))
+    for _ in range(6):
+        x, y = rng.randrange(60, 450), rng.randrange(60, 450)
+        for a in (0, 60, 120):
+            dx, dy = 20 * math.cos(math.radians(a)), 20 * math.sin(math.radians(a))
+            d.line([(x - dx, y - dy), (x + dx, y + dy)], fill=c + (170,), width=3)
+
+
+def pat_blueprint(ov, rng, c):
+    d = ImageDraw.Draw(ov)
+    for v in range(40, 480, 32):
+        d.line([(v, 40), (v, 480)], fill=c + (50,), width=2)
+        d.line([(40, v), (480, v)], fill=c + (50,), width=2)
+    for v in range(40, 480, 128):
+        d.line([(v, 40), (v, 480)], fill=c + (110,), width=3)
+        d.line([(40, v), (480, v)], fill=c + (110,), width=3)
+    d.arc((300, 300, 460, 460), 180, 270, fill=c + (170,), width=4)
+
+
 PATTERNS = {"scan": pat_scanlines, "circuit": pat_circuit, "neural": pat_neural, "orbit": pat_orbits,
-            "aurora": pat_aurora, "grid": pat_grid, "lava": pat_lava, "dither": pat_dither, None: None}
+            "aurora": pat_aurora, "matrix": pat_matrix, "stars": pat_stars, "waves": pat_waves, "hexgrid": pat_hexgrid,
+            "stripes": pat_stripes, "bubbles": pat_bubbles, "snow": pat_snow, "blueprint": pat_blueprint, "grid": pat_grid, "lava": pat_lava, "dither": pat_dither, None: None}
 
 
 # ----------------------------------------------------------------------------------------------
@@ -436,6 +516,76 @@ THEMES = [
          tile=dict(shape="squircle", pal=[(rgb("6A1608"), rgb("1E0504")), (rgb("86220C"), rgb("260804")), (rgb("5A2410"), rgb("1A0806"))],
                    glyph=[(rgb("FFE9A8"), rgb("FFB02E"))], pattern="lava", pattern_color=rgb("FF7A1C"), border=rgb("FFB02E") + (230,), border_w=6,
                    outer_glow=[rgb("FF4A1C")], glyph_glow=[rgb("FF7A1C")], sheen_alpha=36)),
+    # ---------------- Pack 2 : 10 thèmes supplémentaires ----------------
+    dict(name="Matrix", cat="Informatique", desc="Pluie de code vert sur noir absolu.", dark=1, corner=0.22, bw=1.4, shadow=120, glow="00FF41", badge=rgb("00FF41"),
+         c=dict(BarTop="E6020A04", BarBottom="F0000300", Border1="B400FF41", Border2="2800FF41", Sheen="0600FF41", Accent="FF00FF41",
+                LabelBg="F0010601", LabelFg="FFB4FFC8", LabelBorder="7800FF41", Highlight="2400FF41", Divider="5000FF41"),
+         ui=dict(Bg="020702", Panel="061006", Text="B8FFC8", Muted="3E9A52"),
+         tile=dict(shape="square", pal=[(rgb("03180A"), rgb("000500")), (rgb("051F0C"), rgb("000800"))], glyph=[rgb("B8FFC8"), rgb("00FF41")],
+                   pattern="matrix", pattern_color=rgb("00C832"), border=rgb("00FF41") + (190,), border_w=4, sheen=False,
+                   outer_glow=[rgb("007A20")], glyph_glow=[rgb("00D43A")])),
+    dict(name="Blueprint", cat="Informatique", desc="Plan d'ingénieur : bleu cyanotype et traits blancs.", dark=1, corner=0.14, bw=1.6, shadow=80, glow="0A3A8C", badge=rgb("FFD23F"),
+         c=dict(BarTop="E01652A8", BarBottom="EB0E3C86", Border1="C8DCEBFF", Border2="50DCEBFF", Sheen="18FFFFFF", Accent="FFFFD23F",
+                LabelBg="F00C3274", LabelFg="FFFFFFFF", LabelBorder="A0DCEBFF", Highlight="30FFFFFF", Divider="64DCEBFF"),
+         ui=dict(Bg="0E3A82", Panel="14489C", Text="F2F8FF", Muted="A9C7F0"),
+         tile=dict(shape="square", pal=[(rgb("1D63C4"), rgb("0F3C8C")), (rgb("2470D4"), rgb("124596"))], glyph=[rgb("FFFFFF")],
+                   pattern="blueprint", pattern_color=rgb("DCEBFF"), border=(220, 235, 255, 230), border_w=4, sheen=False, glyph_shadow=False)),
+    dict(name="Cyberpunk", cat="Informatique", desc="Jaune néon, rose et cyan : ville futuriste de nuit.", dark=1, corner=0.18, bw=2.2, shadow=130, glow="FCEE0A", badge=rgb("FF2A6D"),
+         c=dict(BarTop="EB14120A", BarBottom="F00A0904", Border1="F0FCEE0A", Border2="C805D9E8", Sheen="0AFCEE0A", Accent="FFFCEE0A",
+                LabelBg="F00E0C06", LabelFg="FFFCEE0A", LabelBorder="C805D9E8", Highlight="30FCEE0A", Divider="8CFF2A6D"),
+         ui=dict(Bg="0E0C06", Panel="1C190A", Text="FFF6A8", Muted="B8A64A"),
+         tile=dict(shape="square", pal=[(rgb("221F0A"), rgb("0A0904")), (rgb("2A0A1C"), rgb("0C0408")), (rgb("062A30"), rgb("020C0E"))],
+                   glyph=[rgb("FCEE0A"), rgb("FF2A6D"), rgb("05D9E8")], pattern="stripes", pattern_color=rgb("FCEE0A"),
+                   border=[rgb("FCEE0A") + (255,), rgb("FF2A6D") + (255,), rgb("05D9E8") + (255,)], border_w=6, sheen=False,
+                   outer_glow=[rgb("8F8606"), rgb("A81540"), rgb("028A94")], glyph_glow=[rgb("C9BC08"), rgb("FF2A6D"), rgb("05D9E8")])),
+    dict(name="Cortex", cat="IA", desc="Assistant lumineux : pastel clair, rond et doux.", dark=0, corner=0.50, bw=1.0, shadow=44, glow="6E5AE6", badge=rgb("FF6B9D"),
+         c=dict(BarTop="F0FFFFFF", BarBottom="E6F1EEFF", Border1="C8FFFFFF", Border2="508C7AF0", Sheen="64FFFFFF", Accent="FF6E5AE6",
+                LabelBg="F6FFFFFF", LabelFg="FF2A2550", LabelBorder="508C7AF0", Highlight="2E6E5AE6", Divider="468C7AF0"),
+         ui=dict(Bg="F6F4FF", Panel="E9E5FA", Text="2A2550", Muted="7C76A8"),
+         tile=dict(shape="circle", pal=[(rgb("A18CFF"), rgb("6E5AE6")), (rgb("FF9CC8"), rgb("E65A9B")), (rgb("7CE0FF"), rgb("4A8CE6")),
+                                       (rgb("9CF0C8"), rgb("4ABF95"))], glyph=WHITE, pattern="bubbles", pattern_color=rgb("FFFFFF"),
+                   border=(255, 255, 255, 200), border_w=6, sheen_alpha=90)),
+    dict(name="Nebula", cat="IA", desc="Nébuleuse : ciel étoilé bleu nuit, violet et rose.", dark=1, corner=0.36, bw=1.2, shadow=100, glow="7A4BFF", badge=rgb("FF7AD9"),
+         c=dict(BarTop="DC120C3C", BarBottom="E6060220", Border1="A0B49BFF", Border2="30B49BFF", Sheen="18FFFFFF", Accent="FFB49BFF",
+                LabelBg="F00A0630", LabelFg="FFEFE9FF", LabelBorder="78B49BFF", Highlight="2AB49BFF", Divider="50B49BFF"),
+         ui=dict(Bg="0A0620", Panel="140C34", Text="EEE9FF", Muted="9A8CC8"),
+         tile=dict(shape="circle", pal=[(rgb("3B2A9E"), rgb("0C0630")), (rgb("7A2A9E"), rgb("1C0630")), (rgb("1F4A9E"), rgb("060A30"))],
+                   glyph=WHITE, pattern="stars", pattern_color=rgb("FFE9A8"), border=(200, 180, 255, 150), border_w=4,
+                   outer_glow=[rgb("5B3BC8")], glyph_glow=[rgb("C9B8FF")])),
+    dict(name="Oracle", cat="IA", desc="Noir profond et or : sobre, précieux, hexagonal.", dark=1, corner=0.32, bw=1.6, shadow=110, glow="D4A63C", badge=rgb("D4A63C"),
+         c=dict(BarTop="E6181410", BarBottom="F00A0806", Border1="D2E6BE5A", Border2="46A8801E", Sheen="14FFE6A0", Accent="FFE6BE5A",
+                LabelBg="F00E0C08", LabelFg="FFFFEDC0", LabelBorder="96E6BE5A", Highlight="2EE6BE5A", Divider="64E6BE5A"),
+         ui=dict(Bg="0C0A06", Panel="1A160E", Text="F6E9C8", Muted="A8966A"),
+         tile=dict(shape="hex", pal=[(rgb("26200E"), rgb("0A0804")), (rgb("2C2410"), rgb("0E0A04"))], glyph=[(rgb("FFF0B8"), rgb("D4A63C"))],
+                   pattern="hexgrid", pattern_color=rgb("E6BE5A"), border=rgb("E6BE5A") + (230,), border_w=5, sheen_alpha=34,
+                   outer_glow=[rgb("8A6A1E")], glyph_glow=[rgb("B8892A")])),
+    dict(name="GameBoy", cat="Games", desc="Console portable 1989 : quatre nuances de vert.", dark=1, corner=0.12, bw=3.0, shadow=120, glow="0F380F", badge=rgb("0F380F"),
+         c=dict(BarTop="FF8BAC0F", BarBottom="FF789A0C", Border1="FF0F380F", Border2="FF306230", Sheen="00FFFFFF", Accent="FF0F380F",
+                LabelBg="FF9BBC0F", LabelFg="FF0F380F", LabelBorder="FF0F380F", Highlight="400F380F", Divider="FF306230"),
+         ui=dict(Bg="9BBC0F", Panel="8BAC0F", Text="0F380F", Muted="306230"),
+         tile=dict(shape="square", pal=[(rgb("9BBC0F"), rgb("8BAC0F")), (rgb("8BAC0F"), rgb("306230"))], glyph=[rgb("0F380F")],
+                   border=(15, 56, 15, 255), border_w=14, sheen=False, glyph_shadow=False, pixel=True, pattern="dither", glyph_scale=0.58)),
+    dict(name="Frostbite", cat="Games", desc="Royaume de glace : bleu givré, cristaux et neige.", dark=0, corner=0.30, bw=1.6, shadow=70, glow="3AA0E8", badge=rgb("FF5A5A"),
+         c=dict(BarTop="E6EAF8FF", BarBottom="DCC4E4FA", Border1="E6FFFFFF", Border2="6478BEEB", Sheen="78FFFFFF", Accent="FF1E88E5",
+                LabelBg="F4EAF6FF", LabelFg="FF12304D", LabelBorder="8C78BEEB", Highlight="3C1E88E5", Divider="5078BEEB"),
+         ui=dict(Bg="E6F3FC", Panel="D2E6F6", Text="12304D", Muted="5C84A8"),
+         tile=dict(shape="hex", pal=[(rgb("B8E6FF"), rgb("3A9BE0")), (rgb("D8F2FF"), rgb("5AB4F0")), (rgb("A8D8FF"), rgb("2A6AC8"))],
+                   glyph=WHITE, pattern="snow", pattern_color=rgb("FFFFFF"), border=(255, 255, 255, 230), border_w=6, sheen_alpha=90,
+                   outer_glow=[rgb("78BEEB")], glyph_glow=[rgb("2A7ACF")])),
+    dict(name="CandyPop", cat="Games", desc="Bonbons acidulés : rose, menthe et jaune, très joyeux.", dark=0, corner=0.50, bw=2.0, shadow=60, glow="E8408C", badge=rgb("FF3D7F"),
+         c=dict(BarTop="F0FFE6F2", BarBottom="E6FFC8E6", Border1="F0FFFFFF", Border2="78FF78B4", Sheen="78FFFFFF", Accent="FFFF3D7F",
+                LabelBg="F6FFF4FA", LabelFg="FF5A1E46", LabelBorder="78FF78B4", Highlight="40FF3D7F", Divider="64FF78B4"),
+         ui=dict(Bg="FFF1F8", Panel="FFDDEE", Text="5A1E46", Muted="B0709A"),
+         tile=dict(shape="circle", pal=[(rgb("FF8FC0"), rgb("FF3D7F")), (rgb("8FF0D0"), rgb("22C59A")), (rgb("FFE066"), rgb("FFA81C")),
+                                       (rgb("A8A0FF"), rgb("6A5BE6")), (rgb("7CD0FF"), rgb("2A9AE6"))], glyph=WHITE, pattern="bubbles",
+                   pattern_color=rgb("FFFFFF"), border=(255, 255, 255, 235), border_w=9, sheen_alpha=100)),
+    dict(name="Emerald", cat="Games", desc="Forêt elfique : émeraude, bois et or, façon RPG fantasy.", dark=1, corner=0.30, bw=2.0, shadow=110, glow="1FBF6A", badge=rgb("F2C94C"),
+         c=dict(BarTop="E6123A28", BarBottom="F0071A12", Border1="D2F2C94C", Border2="5A2FBF7A", Sheen="1CC8FFD8", Accent="FFF2C94C",
+                LabelBg="F00A2018", LabelFg="FFE8FFE0", LabelBorder="A0F2C94C", Highlight="32F2C94C", Divider="64F2C94C"),
+         ui=dict(Bg="081A12", Panel="102A1E", Text="E4FFE6", Muted="6EB088"),
+         tile=dict(shape="squircle", pal=[(rgb("1F8A55"), rgb("0A3822")), (rgb("2A9A62"), rgb("0C4028")), (rgb("177A55"), rgb("08301E"))],
+                   glyph=[(rgb("FFF3C0"), rgb("F2C94C"))], pattern="waves", pattern_color=rgb("A8FFD0"),
+                   border=rgb("F2C94C") + (230,), border_w=6, outer_glow=[rgb("1FBF6A")], glyph_glow=[rgb("2FBF70")], sheen_alpha=50)),
 ]
 
 

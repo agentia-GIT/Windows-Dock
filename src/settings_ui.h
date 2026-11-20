@@ -5,7 +5,7 @@
 #include <uxtheme.h>
 #include <winhttp.h>
 
-static const wchar_t* kVersionW = L"2.2.0";
+static const wchar_t* kVersionW = L"2.3.0";
 static const wchar_t* kDefaultUpdateUrl = L"https://raw.githubusercontent.com/agentia-GIT/Windows-Dock/main/dist/";
 
 enum {
@@ -13,7 +13,7 @@ enum {
     IDC_TAB = 1000,
     IDC_ICONMIN = 1101, IDC_ICONMAX, IDC_ZOOM, IDC_THOP, IDC_ICOP, IDC_OFFSET, IDC_AHDELAY,
     IDC_POS = 1110, IDC_THEME, IDC_MON, IDC_FONT, IDC_HOTKEY, IDC_HKAPPLY,
-    IDC_AUTOHIDE = 1120, IDC_SHOWLABELS, IDC_LOCK, IDC_RUNNING, IDC_OPENRUN, IDC_AUTOSTART,
+    IDC_AUTOHIDE = 1120, IDC_SHOWLABELS, IDC_LOCK, IDC_RUNNING, IDC_OPENRUN, IDC_AUTOSTART, IDC_LOCKDOCK, IDC_FREEMODE,
     IDC_LIST = 1130, IDC_ADD, IDC_ADDSEP, IDC_DEL, IDC_UP, IDC_DOWN,
     IDC_E_TITLE = 1140, IDC_E_CMD, IDC_E_ARGS, IDC_E_WD, IDC_E_ICON, IDC_B_CMD, IDC_B_ICON, IDC_E_SHOW, IDC_APPLYITEM,
     IDC_U_LOCAL = 1150, IDC_U_REMOTE, IDC_U_CHECK, IDC_U_UPDATE, IDC_U_LOG, IDC_U_FOLDER,
@@ -81,7 +81,7 @@ static void ChkSet(HWND c, bool on) {
     SetWindowLongPtrW(c, GWLP_USERDATA, on ? 1 : 0);
     InvalidateRect(c, nullptr, FALSE);
 }
-static bool IsSwitchId(int id) { return id >= IDC_AUTOHIDE && id <= IDC_AUTOSTART; }
+static bool IsSwitchId(int id) { return id >= IDC_AUTOHIDE && id <= IDC_FREEMODE; }
 static HWND Edt(HWND p, int x, int y, int w, int id) {
     return Mk(p, L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, x, y, w, 26, id);
 }
@@ -126,7 +126,8 @@ static bool AutostartGet() {
     HKEY k;
     bool on = false;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_READ, &k) == ERROR_SUCCESS) {
-        on = RegQueryValueExW(k, L"RocketDockModern", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+        on = RegQueryValueExW(k, L"WinDock", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS ||
+             RegQueryValueExW(k, L"RocketDockModern", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
         RegCloseKey(k);
     }
     return on;
@@ -138,8 +139,10 @@ static void AutostartSet(bool on) {
         wchar_t exe[MAX_PATH * 2];
         GetModuleFileNameW(nullptr, exe, MAX_PATH * 2);
         std::wstring v = L"\"" + std::wstring(exe) + L"\"";
-        RegSetValueExW(k, L"RocketDockModern", 0, REG_SZ, (const BYTE*)v.c_str(), (DWORD)((v.size() + 1) * sizeof(wchar_t)));
+        RegDeleteValueW(k, L"RocketDockModern");  // ancien nom
+        RegSetValueExW(k, L"WinDock", 0, REG_SZ, (const BYTE*)v.c_str(), (DWORD)((v.size() + 1) * sizeof(wchar_t)));
     } else {
+        RegDeleteValueW(k, L"WinDock");
         RegDeleteValueW(k, L"RocketDockModern");
     }
     RegCloseKey(k);
@@ -153,8 +156,8 @@ static void AutostartSet(bool on) {
 static HINTERNET g_sess = nullptr;  // session WinHTTP réutilisée pendant une mise à jour
 static void SessOpen() {
     if (g_sess) return;
-    g_sess = WinHttpOpen(L"RocketDockModern/2.2", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!g_sess) g_sess = WinHttpOpen(L"RocketDockModern/2.2", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    g_sess = WinHttpOpen(L"WinDock/2.3", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!g_sess) g_sess = WinHttpOpen(L"WinDock/2.3", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
 }
 static void SessClose() {
     if (g_sess) { WinHttpCloseHandle(g_sess); g_sess = nullptr; }
@@ -261,8 +264,14 @@ static DWORD WINAPI UpdThread(LPVOID p) {
     {
         std::wstring txt = Utf8ToW(body);
         size_t pos = 0;
-        const std::wstring mine = (sizeof(void*) == 8) ? L"rocketdockmodern_x64.exe" : L"rocketdockmodern_x86.exe";
-        const std::wstring other = (sizeof(void*) == 8) ? L"rocketdockmodern_x86.exe" : L"rocketdockmodern_x64.exe";
+        // Le fichier de l'exécutable en cours est remplacé par l'entrée du manifeste qui porte son nom
+        // (ou à défaut WinDock_x64/x86.exe). Les exécutables des autres noms / architectures sont ignorés.
+        const wchar_t* defName = (sizeof(void*) == 8) ? L"windock_x64.exe" : L"windock_x86.exe";
+        std::wstring mine = Lower(PathFindFileNameW(job->exePath.c_str()));
+        if (Lower(txt).find(mine) == std::wstring::npos) mine = defName;
+        auto isExeName = [](const std::wstring& n) {
+            return n.size() > 8 && (n.substr(n.size() - 8) == L"_x64.exe" || n.substr(n.size() - 8) == L"_x86.exe");
+        };
         while (pos <= txt.size()) {
             size_t e = txt.find(L'\n', pos);
             std::wstring line = TrimW(txt.substr(pos, e == std::wstring::npos ? e : e - pos));
@@ -272,7 +281,7 @@ static DWORD WINAPI UpdThread(LPVOID p) {
             std::wstring low = Lower(line);
             if (line.find(L"..") != std::wstring::npos || line[0] == L'/' || line.find(L':') != std::wstring::npos) continue;
             if (low == L"settings.ini") continue;  // la configuration n'est jamais remplacée
-            if (low == other) continue;
+            if (isExeName(low) && low != mine) continue;
             F f;
             f.rel = line;
             f.isExe = (low == mine);
@@ -462,6 +471,8 @@ static void SyncControls(bool full = true) {
     ChkSet(GetDlgItem(b, IDC_RUNNING), s.showRunning);
     ChkSet(GetDlgItem(b, IDC_OPENRUN), s.openRunning);
     ChkSet(GetDlgItem(b, IDC_AUTOSTART), AutostartGet());
+    ChkSet(GetDlgItem(b, IDC_LOCKDOCK), s.lockDock);
+    ChkSet(GetDlgItem(b, IDC_FREEMODE), s.free);
     SetSlider(b, IDC_AHDELAY, s.autoHideDelay, L" ms");
     if (full || GetFocus() != GetDlgItem(b, IDC_HOTKEY)) SetDlgItemTextW(b, IDC_HOTKEY, s.hotkey.c_str());
     if (full || ListIsStale()) {
@@ -576,8 +587,8 @@ static LRESULT CALLBACK NavProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 FontFamily ff(L"Segoe UI"), fi(L"Segoe MDL2 Assets");
                 Font fTitle(&ff, 17 * S, FontStyleBold, UnitPixel), fSub(&ff, 11 * S, FontStyleRegular, UnitPixel),
                     fItem(&ff, 14 * S, FontStyleRegular, UnitPixel), fIcon(&fi, 17 * S, FontStyleRegular, UnitPixel);
-                DrawTxt(g, L"RocketDock", fTitle, RectF(24 * S, 20 * S, 160 * S, 26 * S), Gc(g_cText));
-                DrawTxt(g, L"Modern  ·  " + std::wstring(T(L"Paramètres", L"Settings")), fSub,
+                DrawTxt(g, L"Win-Dock", fTitle, RectF(24 * S, 20 * S, 160 * S, 26 * S), Gc(g_cText));
+                DrawTxt(g, std::wstring(T(L"Paramètres", L"Settings")), fSub,
                         RectF(24 * S, 46 * S, 160 * S, 20 * S), Gc(g_cMuted));
                 for (int i = 0; i < kPages; ++i) {
                     RectF r = NavItemRect(i);
@@ -964,11 +975,18 @@ static void BuildPageBehavior(HWND p) {
     Chk(p, T(L"Indiquer les applications ouvertes", L"Show running applications"), 14, 98, 420, IDC_RUNNING);
     Chk(p, T(L"Un clic sur une application ouverte l'affiche au premier plan", L"Clicking a running app brings it to front"), 14, 126, 540, IDC_OPENRUN);
     Chk(p, T(L"Lancer le dock au démarrage de Windows", L"Start the dock with Windows"), 14, 154, 420, IDC_AUTOSTART);
-    Slider(p, IDC_AHDELAY, T(L"Délai avant masquage", L"Hide delay"), 194, 0, 3000);
-    Lbl(p, T(L"Raccourci afficher / masquer", L"Show / hide shortcut"), 14, 240, 175);
-    Edt(p, 190, 236, 170, IDC_HOTKEY);
-    Btn(p, T(L"Appliquer", L"Apply"), 370, 235, 100, IDC_HKAPPLY);
-    Hint(p, T(L"Exemples : Control+Alt+R, Win+F9, Shift+Alt+D", L"Examples: Control+Alt+R, Win+F9, Shift+Alt+D"), 190, 266, 400);
+    Chk(p, T(L"Dock flottant : le placer où l'on veut sur le bureau", L"Floating dock: place it anywhere on the desktop"), 14, 182, 540, IDC_FREEMODE);
+    Chk(p, T(L"Verrouiller la position du dock", L"Lock the dock position"), 14, 210, 540, IDC_LOCKDOCK);
+    Slider(p, IDC_AHDELAY, T(L"Délai avant masquage", L"Hide delay"), 254, 0, 3000);
+    Lbl(p, T(L"Raccourci afficher / masquer", L"Show / hide shortcut"), 14, 300, 175);
+    Edt(p, 190, 296, 170, IDC_HOTKEY);
+    Btn(p, T(L"Appliquer", L"Apply"), 370, 295, 100, IDC_HKAPPLY);
+    Hint(p, T(L"Exemples : Control+Alt+R, Win+F9, Shift+Alt+D", L"Examples: Control+Alt+R, Win+F9, Shift+Alt+D"), 190, 326, 400);
+    Hint(p, T(L"Déplacer le dock : glissez le fond de la barre (ou Alt + glisser). Près d'un bord il s'ancre ; ailleurs il flotte. "
+              L"Déposez des raccourcis ou programmes depuis le bureau / l'Explorateur pour les ajouter.",
+              L"Move the dock: drag the bar background (or Alt + drag). Near an edge it snaps; elsewhere it floats. "
+              L"Drop shortcuts or programs from the desktop / Explorer to add them."),
+         14, 362, 600, 60);
 }
 
 static void BuildPageItems(HWND p) {
@@ -1093,6 +1111,12 @@ static void OnCommand(HWND h, int id, int code, HWND ctl) {
         case IDC_LOCK: s.lockIcons = ChkGet(ctl); SaveSettings(); break;
         case IDC_RUNNING: s.showRunning = ChkGet(ctl); A.dirty = true; SaveSettings(); break;
         case IDC_OPENRUN: s.openRunning = ChkGet(ctl); SaveSettings(); break;
+        case IDC_LOCKDOCK: s.lockDock = ChkGet(ctl); SaveSettings(); break;
+        case IDC_FREEMODE:
+            s.free = ChkGet(ctl);
+            if (s.free) { s.freeX = A.g.X; s.freeY = A.g.Y; }
+            RecalcGeometry(); SaveSettings();
+            break;
         case IDC_AUTOSTART: AutostartSet(ChkGet(ctl)); break;
         case IDC_HKAPPLY: {
             GetDlgItemTextW(b, IDC_HOTKEY, buf, 256);

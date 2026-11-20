@@ -1,4 +1,4 @@
-// RocketDock Modern 2.0 - lanceur d'applications (dock) pour Windows 10/11.
+// Win-Dock - lanceur d'applications (dock) pour Windows 10/11.
 // Win32 + GDI+, un seul .exe sans dépendance. Compatible avec le Settings.ini de RocketDock.
 //
 // Architecture :
@@ -17,6 +17,7 @@
 #include <vector>
 
 #include <windows.h>
+#include <ole2.h>
 #include <objidl.h>
 #include <gdiplus.h>
 #include <shlobj.h>
@@ -37,8 +38,8 @@ using namespace Gdiplus;
 static bool g_fr = false;
 #define T(fr, en) (g_fr ? (fr) : (en))
 
-static const wchar_t* kAppName = L"RocketDock Modern";
-static const wchar_t* kClass = L"RocketDockModernWnd";
+static const wchar_t* kAppName = L"Win-Dock";
+static const wchar_t* kClass = L"WinDockWnd";
 static const wchar_t* kSecMain = L"Software\\RocketDock";
 static const wchar_t* kSecIcons = L"Software\\RocketDock\\Icons";
 
@@ -112,6 +113,9 @@ struct Settings {
     std::wstring theme = L"Dark";
     std::wstring hotkey = L"Control+Alt+R";
     std::wstring fontName = L"Segoe UI";
+    bool free = false;      // dock flottant : position libre sur le bureau
+    int freeX = 0, freeY = 0;
+    bool lockDock = false;  // interdit de déplacer le dock à la souris
 };
 
 static std::wstring g_ini;
@@ -702,6 +706,13 @@ struct App {
     int pressIdx = -1;
     POINT pressPt = {};
     bool dragging = false;
+    // déplacement du dock
+    bool moving = false;
+    POINT moveCur = {}, moveOrg = {};
+    bool geoReady = false;
+    // dépôt de fichiers (OLE)
+    bool dropActive = false;
+    int dropAt = -1;
     // divers
     DWORD lastRunning = 0, lastBin = 0, lastTop = 0;
     bool binFull = false;
@@ -786,8 +797,11 @@ static std::vector<bool> SepVec() {
     return v;
 }
 
+static bool AutoHideOn() { return A.set.autoHide && !A.set.free; }
+
 static void RecalcGeometry() {
     Geo& g = A.g;
+    const int prevW = g.W, prevH = g.H;
     float S = g.S;
     g.vertical = (A.set.side == SIDE_LEFT || A.set.side == SIDE_RIGHT);
     // Moniteur
@@ -800,8 +814,14 @@ static void RecalcGeometry() {
         mi.rcWork = mi.rcMonitor;
         mons.push_back(mi);
     }
-    const MONITORINFO& mi = mons[(size_t)std::min<int>(std::max(A.set.monitor, 0), (int)mons.size() - 1)];
-    g.mon = A.set.autoHide ? mi.rcMonitor : mi.rcWork;
+    size_t mIdx = (size_t)std::min<int>(std::max(A.set.monitor, 0), (int)mons.size() - 1);
+    if (A.set.free) {  // dock flottant : écran qui contient son centre
+        POINT c = {A.set.freeX + prevW / 2, A.set.freeY + prevH / 2};
+        for (size_t i = 0; i < mons.size(); ++i)
+            if (PtInRect(&mons[i].rcMonitor, c)) { mIdx = i; break; }
+    }
+    const MONITORINFO& mi = mons[mIdx];
+    g.mon = AutoHideOn() ? mi.rcMonitor : mi.rcWork;
     float monLen = (float)(g.vertical ? (g.mon.bottom - g.mon.top) : (g.mon.right - g.mon.left));
     float monThick = (float)(g.vertical ? (g.mon.right - g.mon.left) : (g.mon.bottom - g.mon.top));
 
@@ -835,7 +855,16 @@ static void RecalcGeometry() {
     g.W = g.vertical ? Ti : Li;
     g.H = g.vertical ? Li : Ti;
     int along = A.set.offset;
-    switch (A.set.side) {
+    if (A.set.free) {
+        // garde le centre du dock quand sa taille change (ajout / retrait d'icônes)
+        if (A.geoReady) {
+            A.set.freeX += (prevW - g.W) / 2;
+            A.set.freeY += (prevH - g.H) / 2;
+        }
+        g.X = A.set.freeX;
+        g.Y = A.set.freeY;
+        g.mon = mi.rcMonitor;
+    } else switch (A.set.side) {
         case SIDE_TOP:
             g.X = g.mon.left + ((g.mon.right - g.mon.left) - g.W) / 2 + along; g.Y = g.mon.top; break;
         case SIDE_LEFT:
@@ -847,6 +876,8 @@ static void RecalcGeometry() {
     }
     g.X = std::max<int>(g.mon.left, std::min<int>(g.X, g.mon.right - g.W));
     g.Y = std::max<int>(g.mon.top, std::min<int>(g.Y, g.mon.bottom - g.H));
+    if (A.set.free) { A.set.freeX = g.X; A.set.freeY = g.Y; }
+    A.geoReady = true;
     for (auto& it : A.items) if (it.size <= 0) it.size = s0;
     BuildFonts();
     EnsureSurface();
@@ -978,6 +1009,22 @@ static void Render() {
         }
     }
 
+    // Marqueur d'insertion (glisser-déposer de raccourcis)
+    if (A.dropActive && A.dropAt >= 0 && A.real.left.size() == A.items.size()) {
+        size_t n = A.items.size();
+        float um;
+        if (n == 0) um = G.L * 0.5f - A.realStart;
+        else if ((size_t)A.dropAt >= n) um = A.real.left[n - 1] + A.real.width[n - 1] + G.gap * 0.5f;
+        else if (A.dropAt == 0) um = A.real.left[0] - G.gap * 0.5f;
+        else um = (A.real.left[A.dropAt - 1] + A.real.width[A.dropAt - 1] + A.real.left[A.dropAt]) * 0.5f;
+        float uc = A.realStart + um;
+        RectF mk = MapRect(uc - 2 * S, uc + 2 * S, bv0 + 5 * S, bv1 - 5 * S);
+        GraphicsPath mp;
+        RRPath(mp, mk, 2 * S);
+        SolidBrush mb(th.accent);
+        g.FillPath(&mb, &mp);
+    }
+
     // Étiquette
     if (A.labelA > 0.02f && A.labelIdx >= 0 && A.labelIdx < (int)A.items.size() && !A.set.hideLabels) {
         Item& it = A.items[A.labelIdx];
@@ -1035,7 +1082,7 @@ static void Render() {
 // ---------------------------------------------------------------------------------------------
 static void SaveSettings() {
     const Settings& s = A.set;
-    IniPut(kSecMain, L"Version", L"2.2.0");
+    IniPut(kSecMain, L"Version", L"2.3.0");
     IniPut(kSecMain, L"Position", SideName(s.side));
     IniPutInt(kSecMain, L"Offset", s.offset);
     IniPutInt(kSecMain, L"Monitor", s.monitor);
@@ -1050,6 +1097,10 @@ static void SaveSettings() {
     IniPutInt(kSecMain, L"OpenRunning", s.openRunning);
     IniPutInt(kSecMain, L"ThemeOpacity", s.themeOpacity);
     IniPutInt(kSecMain, L"IconOpacity", s.iconOpacity);
+    IniPutInt(kSecMain, L"FreeMode", s.free);
+    IniPutInt(kSecMain, L"FreeX", s.freeX);
+    IniPutInt(kSecMain, L"FreeY", s.freeY);
+    IniPutInt(kSecMain, L"LockDock", s.lockDock);
     IniPut(kSecMain, L"Theme", s.theme);
     IniPut(kSecMain, L"HotKey-Toggle", s.hotkey);
     IniPut(kSecMain, L"FontName", s.fontName);
@@ -1105,6 +1156,10 @@ static void LoadSettings() {
     s.openRunning = IniInt(kSecMain, L"OpenRunning", 1) != 0;
     s.themeOpacity = std::min(std::max(IniInt(kSecMain, L"ThemeOpacity", 100), 20), 100);
     s.iconOpacity = std::min(std::max(IniInt(kSecMain, L"IconOpacity", 100), 20), 100);
+    s.free = IniInt(kSecMain, L"FreeMode", 0) != 0;
+    s.freeX = IniInt(kSecMain, L"FreeX", 0);
+    s.freeY = IniInt(kSecMain, L"FreeY", 0);
+    s.lockDock = IniInt(kSecMain, L"LockDock", 0) != 0;
     s.theme = IniGet(kSecMain, L"Theme", L"Dark");
     s.hotkey = IniGet(kSecMain, L"HotKey-Toggle", L"Control+Alt+R");
     s.fontName = IniGet(kSecMain, L"FontName", L"Segoe UI");
@@ -1347,7 +1402,7 @@ static void RegisterToggleHotkey() {
 enum {
     ID_OPEN = 100, ID_ADMIN, ID_LOCATION, ID_REMOVE, ID_EMPTYBIN,
     ID_ADDPROG = 200, ID_ADDSEP, ID_LOCK, ID_AUTOHIDE, ID_LABELS, ID_RUNNING, ID_OPENINI, ID_RELOAD, ID_EXIT, ID_SETTINGS,
-    ID_POS = 300, ID_SIZE = 320, ID_THEME = 1200
+    ID_POS = 300, ID_FREE = 310, ID_LOCKDOCK = 311, ID_SIZE = 320, ID_THEME = 1200
 };
 static const int kSizes[][2] = {{36, 64}, {44, 80}, {56, 100}, {68, 120}};
 static std::vector<ThemeInfo> g_menuThemes;  // thèmes du sous-menu courant
@@ -1402,6 +1457,11 @@ static void ShowMenu(int hitIdx) {
     const wchar_t* posNames[] = {T(L"Haut", L"Top"), T(L"Gauche", L"Left"), T(L"Bas", L"Bottom"), T(L"Droite", L"Right")};
     for (int i = 0; i < 4; ++i)
         AppendMenuW(pos, MF_STRING | (A.set.side == i ? MF_CHECKED : 0), ID_POS + i, posNames[i]);
+    AppendMenuW(pos, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(pos, MF_STRING | (A.set.free ? MF_CHECKED : 0), ID_FREE, T(L"Libre (flottant sur le bureau)", L"Free (floating on desktop)"));
+    AppendMenuW(pos, MF_STRING | (A.set.lockDock ? MF_CHECKED : 0), ID_LOCKDOCK, T(L"Verrouiller la position", L"Lock position"));
+    AppendMenuW(pos, MF_STRING | MF_GRAYED, 0, T(L"Glisser le fond de la barre pour déplacer", L"Drag the bar background to move"));
+    for (int i = 0; i < 4; ++i) CheckMenuItem(pos, ID_POS + i, MF_BYCOMMAND | ((!A.set.free && A.set.side == i) ? MF_CHECKED : MF_UNCHECKED));
     AppendMenuW(m, MF_POPUP, (UINT_PTR)pos, T(L"Position à l'écran", L"Screen position"));
 
     HMENU th = CreatePopupMenu();
@@ -1426,7 +1486,7 @@ static void ShowMenu(int hitIdx) {
         AppendMenuW(sz, MF_STRING | (A.set.iconMin == kSizes[i][0] ? MF_CHECKED : 0), ID_SIZE + i, szNames[i]);
     AppendMenuW(m, MF_POPUP, (UINT_PTR)sz, T(L"Taille des icônes", L"Icon size"));
 
-    AppendMenuW(m, MF_STRING | (A.set.autoHide ? MF_CHECKED : 0), ID_AUTOHIDE, T(L"Masquer automatiquement", L"Auto-hide"));
+    AppendMenuW(m, MF_STRING | (A.set.autoHide ? MF_CHECKED : 0) | (A.set.free ? MF_GRAYED : 0), ID_AUTOHIDE, T(L"Masquer automatiquement", L"Auto-hide"));
     AppendMenuW(m, MF_STRING | (A.set.hideLabels ? 0 : MF_CHECKED), ID_LABELS, T(L"Afficher les noms", L"Show labels"));
     AppendMenuW(m, MF_STRING | (A.set.showRunning ? MF_CHECKED : 0), ID_RUNNING,
                 T(L"Indiquer les applications ouvertes", L"Show running applications"));
@@ -1484,6 +1544,12 @@ static void ShowMenu(int hitIdx) {
             SaveSettings();
             break;
         }
+        case ID_FREE:
+            A.set.free = !A.set.free;
+            if (A.set.free) { A.set.freeX = A.g.X; A.set.freeY = A.g.Y; }
+            RecalcGeometry(); SaveSettings();
+            break;
+        case ID_LOCKDOCK: A.set.lockDock = !A.set.lockDock; SaveSettings(); break;
         case ID_LOCK: A.set.lockIcons = !A.set.lockIcons; SaveSettings(); break;
         case ID_AUTOHIDE: A.set.autoHide = !A.set.autoHide; RecalcGeometry(); SaveSettings(); break;
         case ID_LABELS: A.set.hideLabels = !A.set.hideLabels; A.dirty = true; SaveSettings(); break;
@@ -1495,6 +1561,7 @@ static void ShowMenu(int hitIdx) {
         default:
             if (cmd >= ID_POS && cmd < ID_POS + 4) {
                 A.set.side = cmd - ID_POS;
+                A.set.free = false;  // choisir un bord ré-ancre le dock
                 RecalcGeometry(); SaveSettings();
             } else if (cmd >= ID_THEME && cmd < ID_THEME + (int)g_menuThemes.size()) {
                 ApplyTheme(g_menuThemes[cmd - ID_THEME].folder);
@@ -1546,11 +1613,12 @@ static void Tick() {
         if (A.hide < 0.5f) {
             float topV = G.edgeGap + std::max(G.barH, G.padBottom + MaxSize() + G.padTop) + 4 * G.S;
             hot = inWin && cu >= uA && cu <= uB && cv >= -2 && cv <= topV;
-        } else if (A.set.autoHide) {
+        } else if (AutoHideOn()) {
             float mid = G.L * 0.5f;
             hot = inWin && cv <= 2.5f * G.S && std::fabs(cu - mid) <= std::max(vis * 0.5f, 120 * G.S);
         }
-        if (A.menuOpen || A.dragging) hot = A.hotPrev;
+        if (A.menuOpen || A.dragging || A.moving) hot = A.hotPrev;
+        if (A.dropActive) hot = true;
     }
     A.hotPrev = hot;
     {
@@ -1561,7 +1629,7 @@ static void Tick() {
     if (hot) A.idleT = 0; else A.idleT += dt;
 
     // --- Masquage automatique ---
-    bool wantHidden = A.forceHidden || (A.set.autoHide && !hot && !A.menuOpen && !A.dragging &&
+    bool wantHidden = A.forceHidden || (AutoHideOn() && !hot && !A.menuOpen && !A.dragging && !A.moving && !A.dropActive &&
                                         A.idleT * 1000.0f >= (float)A.set.autoHideDelay);
     {
         float old = A.hide;
@@ -1658,6 +1726,133 @@ static int HitAt(int x, int y) {
     return dm::hitIndex(A.real, A.g.gap, u - A.realStart);
 }
 
+// Le point (client) est-il sur le fond de la barre (hors icône) ?
+static bool OnBarBackground(int x, int y) {
+    float u, v;
+    ToUV((float)x, (float)y, u, v);
+    float u0 = A.realStart - A.g.padSide, u1 = A.realStart + A.real.total + A.g.padSide;
+    if (A.items.empty()) { u0 = A.g.L * 0.5f - 45 * A.g.S; u1 = A.g.L * 0.5f + 45 * A.g.S; }
+    return u >= u0 && u <= u1 && v >= 0 && v <= A.g.edgeGap + A.g.barH && A.hide < 0.5f;
+}
+
+// Fin du déplacement : ancre le dock au bord le plus proche s'il en est assez près, sinon le laisse flottant.
+static void FinishMove(POINT cur) {
+    Geo& g = A.g;
+    const float S = g.S;
+    HMONITOR hm = MonitorFromPoint(cur, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(hm, &mi);
+    std::vector<MONITORINFO> mons;
+    EnumDisplayMonitors(nullptr, nullptr, MonCb, (LPARAM)&mons);
+    for (size_t i = 0; i < mons.size(); ++i)
+        if (EqualRect(&mons[i].rcMonitor, &mi.rcMonitor)) { A.set.monitor = (int)i; break; }
+
+    // rectangle de la barre à l'écran (sans masquage)
+    float u0 = A.realStart - g.padSide, u1 = A.realStart + A.real.total + g.padSide;
+    RectF bar = MapRect(u0, u1, g.edgeGap, g.edgeGap + g.barH);
+    float bl = g.X + bar.X, bt = g.Y + bar.Y, br = bl + bar.Width, bb = bt + bar.Height;
+    const RECT& wk = mi.rcWork;
+    float dTop = bt - wk.top, dLeft = bl - wk.left, dBottom = wk.bottom - bb, dRight = wk.right - br;
+    float thr = 64 * S;
+    float best = std::min(std::min(dTop, dBottom), std::min(dLeft, dRight));
+    if (best <= thr) {
+        int side = best == dTop ? SIDE_TOP : best == dLeft ? SIDE_LEFT : best == dBottom ? SIDE_BOTTOM : SIDE_RIGHT;
+        bool newVert = side == SIDE_LEFT || side == SIDE_RIGHT;
+        const RECT& ref = A.set.autoHide ? mi.rcMonitor : mi.rcWork;
+        float c;  // centre du dock le long du bord
+        if (newVert == g.vertical) c = newVert ? g.Y + g.H * 0.5f : g.X + g.W * 0.5f;
+        else c = newVert ? (float)cur.y : (float)cur.x;
+        float mc = newVert ? (ref.top + ref.bottom) * 0.5f : (ref.left + ref.right) * 0.5f;
+        A.set.side = side;
+        A.set.offset = (int)(c - mc);
+        A.set.free = false;
+    } else {
+        A.set.free = true;
+        A.set.freeX = g.X;
+        A.set.freeY = g.Y;
+    }
+    RecalcGeometry();
+    SaveSettings();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Glisser-déposer OLE : raccourcis, programmes et dossiers glissés depuis l'Explorateur / le bureau
+// ---------------------------------------------------------------------------------------------
+static int DropSlot(POINTL pt) {
+    POINT p = {pt.x, pt.y};
+    ScreenToClient(A.hwnd, &p);
+    float u, v;
+    ToUV((float)p.x, (float)p.y, u, v);
+    if (A.items.empty() || A.real.left.size() != A.items.size()) return (int)A.items.size();
+    int nearIdx = dm::nearestSlot(A.real, u - A.realStart);
+    if (nearIdx < 0) return (int)A.items.size();
+    float c = A.real.left[nearIdx] + A.real.width[nearIdx] * 0.5f;
+    return (u - A.realStart > c) ? nearIdx + 1 : nearIdx;
+}
+
+struct DockDropTarget : IDropTarget {
+    LONG ref = 1;
+    bool ok = false;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID r, void** o) override {
+        if (r == IID_IUnknown || r == IID_IDropTarget) { *o = static_cast<IDropTarget*>(this); AddRef(); return S_OK; }
+        *o = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return (ULONG)InterlockedIncrement(&ref); }
+    ULONG STDMETHODCALLTYPE Release() override { return (ULONG)InterlockedDecrement(&ref); }  // instance statique
+    HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* d, DWORD, POINTL pt, DWORD* eff) override {
+        FORMATETC f = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+        ok = d && d->QueryGetData(&f) == S_OK;
+        *eff = ok ? DROPEFFECT_LINK : DROPEFFECT_NONE;
+        A.dropActive = ok;
+        A.dropAt = ok ? DropSlot(pt) : -1;
+        A.dirty = true;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL pt, DWORD* eff) override {
+        *eff = ok ? DROPEFFECT_LINK : DROPEFFECT_NONE;
+        if (ok) { A.dropAt = DropSlot(pt); A.dirty = true; }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DragLeave() override {
+        A.dropActive = false;
+        A.dropAt = -1;
+        A.dirty = true;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Drop(IDataObject* d, DWORD, POINTL pt, DWORD* eff) override {
+        *eff = DROPEFFECT_NONE;
+        A.dropActive = false;
+        A.dropAt = -1;
+        A.dirty = true;
+        FORMATETC f = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+        STGMEDIUM sm = {};
+        if (!d || d->GetData(&f, &sm) != S_OK) return S_OK;
+        HDROP hd = (HDROP)GlobalLock(sm.hGlobal);
+        if (hd) {
+            int at = DropSlot(pt);
+            UINT n = DragQueryFileW(hd, 0xFFFFFFFF, nullptr, 0);
+            std::vector<std::wstring> paths;
+            for (UINT i = 0; i < n; ++i) {
+                wchar_t path[MAX_PATH * 2];
+                if (DragQueryFileW(hd, i, path, MAX_PATH * 2)) paths.push_back(path);
+            }
+            GlobalUnlock(sm.hGlobal);
+            ReleaseStgMedium(&sm);
+            for (auto& pth : paths) {
+                AddPath(pth, at);
+                if (at >= 0) ++at;
+            }
+            if (!paths.empty()) *eff = DROPEFFECT_LINK;
+        } else {
+            ReleaseStgMedium(&sm);
+        }
+        return S_OK;
+    }
+};
+static DockDropTarget g_drop;
+
 static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_TIMER:
@@ -1670,10 +1865,35 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             A.pressIdx = HitAt(x, y);
             A.pressPt.x = x; A.pressPt.y = y;
             A.dragging = false;
+            bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            bool bg = A.pressIdx < 0 ? OnBarBackground(x, y)
+                                     : (A.pressIdx < (int)A.items.size() && A.items[A.pressIdx].sep);
+            if (!A.set.lockDock && (bg || alt)) {  // déplacer le dock : fond de la barre, séparateur ou Alt+glisser
+                A.pressIdx = -1;
+                A.moving = true;
+                GetCursorPos(&A.moveCur);
+                A.moveOrg.x = A.g.X; A.moveOrg.y = A.g.Y;
+                SetCapture(h);
+                return 0;
+            }
             if (A.pressIdx >= 0) SetCapture(h);
             return 0;
         }
         case WM_MOUSEMOVE: {
+            if (A.moving && (wp & MK_LBUTTON)) {
+                POINT c;
+                GetCursorPos(&c);
+                SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+                int nx = A.moveOrg.x + (c.x - A.moveCur.x), ny = A.moveOrg.y + (c.y - A.moveCur.y);
+                // reste dans le bureau virtuel (au moins la barre visible)
+                int vl = GetSystemMetrics(SM_XVIRTUALSCREEN), vt = GetSystemMetrics(SM_YVIRTUALSCREEN);
+                int vr = vl + GetSystemMetrics(SM_CXVIRTUALSCREEN), vb = vt + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+                nx = std::max(vl - A.g.W / 2, std::min(nx, vr - A.g.W / 2));
+                ny = std::max(vt - A.g.H / 2, std::min(ny, vb - A.g.H / 2));
+                A.g.X = nx; A.g.Y = ny;
+                SetWindowPos(h, HWND_TOPMOST, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+                return 0;
+            }
             if (A.pressIdx >= 0 && (wp & MK_LBUTTON) && !A.set.lockIcons) {
                 int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
                 if (!A.dragging && (std::abs(x - A.pressPt.x) + std::abs(y - A.pressPt.y)) > (int)(6 * A.g.S)) A.dragging = true;
@@ -1694,6 +1914,14 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_LBUTTONUP: {
+            if (A.moving) {
+                A.moving = false;
+                if (GetCapture() == h) ReleaseCapture();
+                POINT c;
+                GetCursorPos(&c);
+                FinishMove(c);
+                return 0;
+            }
             int idx = A.pressIdx;
             bool wasDrag = A.dragging;
             A.pressIdx = -1;
@@ -1716,6 +1944,9 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        case WM_CAPTURECHANGED:
+            if (A.moving && (HWND)lp != h) { A.moving = false; RecalcGeometry(); }
+            return 0;
         case WM_RBUTTONUP:
             ShowMenu(HitAt((short)LOWORD(lp), (short)HIWORD(lp)));
             return 0;
@@ -1754,6 +1985,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_DESTROY:
             if (g_setWnd) DestroyWindow(g_setWnd);
+            RevokeDragDrop(h);
             KillTimer(h, 1);
             UnregisterHotKey(h, 1);
             PostQuitMessage(0);
@@ -1765,7 +1997,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     // Instance unique
     const bool restart = wcsstr(GetCommandLineW(), L"--restart") != nullptr;
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\RocketDockModern.SingleInstance");
+    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\WinDock.SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         if (!restart) return 0;
         // Redémarrage après mise à jour : on attend la fin de l'ancienne instance
@@ -1783,7 +2015,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     if (setCtx) setCtx((HANDLE)-4);  // PER_MONITOR_AWARE_V2 (le manifeste le fait déjà si présent)
 
     g_fr = (PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_FRENCH);
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    OleInitialize(nullptr);  // COM + glisser-déposer OLE
     GdiplusStartupInput gi;
     GdiplusStartup(&A.gdipToken, &gi, nullptr);
 
@@ -1812,10 +2044,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     wc.lpszClassName = kClass;
     wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(2));
     RegisterClassExW(&wc);
-    A.hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_ACCEPTFILES,
+    A.hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
                              kClass, kAppName, WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, hInst, nullptr);
     if (!A.hwnd) return 1;
-    DragAcceptFiles(A.hwnd, TRUE);
+    RegisterDragDrop(A.hwnd, &g_drop);
 
     LoadSettings();
     ApplyIconOpacity();
@@ -1841,7 +2073,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     if (A.dib) DeleteObject(A.dib);
     if (A.mem) DeleteDC(A.mem);
     GdiplusShutdown(A.gdipToken);
-    CoUninitialize();
+    OleUninitialize();
     timeEndPeriod(1);
     if (mutex) CloseHandle(mutex);
     return (int)msg.wParam;
