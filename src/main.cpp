@@ -9,6 +9,7 @@
 #define UNICODE
 #define _UNICODE
 #include <algorithm>
+#include <initializer_list>
 #include <cmath>
 #include <cstdint>
 #include <map>
@@ -853,7 +854,7 @@ static void Render() {
 // ---------------------------------------------------------------------------------------------
 static void SaveSettings() {
     const Settings& s = A.set;
-    IniPut(kSecMain, L"Version", L"2.0.0");
+    IniPut(kSecMain, L"Version", L"2.1.0");
     IniPut(kSecMain, L"Position", SideName(s.side));
     IniPutInt(kSecMain, L"Offset", s.offset);
     IniPutInt(kSecMain, L"Monitor", s.monitor);
@@ -1164,11 +1165,15 @@ static void RegisterToggleHotkey() {
 // ---------------------------------------------------------------------------------------------
 enum {
     ID_OPEN = 100, ID_ADMIN, ID_LOCATION, ID_REMOVE, ID_EMPTYBIN,
-    ID_ADDPROG = 200, ID_ADDSEP, ID_LOCK, ID_AUTOHIDE, ID_LABELS, ID_RUNNING, ID_OPENINI, ID_RELOAD, ID_EXIT,
+    ID_ADDPROG = 200, ID_ADDSEP, ID_LOCK, ID_AUTOHIDE, ID_LABELS, ID_RUNNING, ID_OPENINI, ID_RELOAD, ID_EXIT, ID_SETTINGS,
     ID_POS = 300, ID_THEME = 310, ID_SIZE = 320
 };
 static const int kSizes[][2] = {{36, 64}, {44, 80}, {56, 100}, {68, 120}};
 static const wchar_t* kThemes[] = {L"Dark", L"Light", L"Aurora"};
+
+static HWND g_setWnd = nullptr;     // fenêtre Paramètres (settings_ui.h)
+static void OpenSettings();
+static void ApplyIconOpacity();
 
 static void Reload() {
     LoadSettings();
@@ -1177,6 +1182,7 @@ static void Reload() {
     RecalcGeometry();
     RegisterToggleHotkey();
     ApplyMenuTheme();
+    ApplyIconOpacity();
 }
 
 static void ShowMenu(int hitIdx) {
@@ -1223,6 +1229,7 @@ static void ShowMenu(int hitIdx) {
                 T(L"Indiquer les applications ouvertes", L"Show running applications"));
     AppendMenuW(m, MF_STRING | (A.set.lockIcons ? MF_CHECKED : 0), ID_LOCK, T(L"Verrouiller les icônes", L"Lock icons"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, ID_SETTINGS, T(L"Paramètres…", L"Settings…"));
     AppendMenuW(m, MF_STRING, ID_OPENINI, T(L"Modifier Settings.ini", L"Edit Settings.ini"));
     AppendMenuW(m, MF_STRING, ID_RELOAD, T(L"Recharger la configuration", L"Reload configuration"));
     AppendMenuW(m, MF_STRING, ID_EXIT, T(L"Quitter", L"Exit"));
@@ -1278,6 +1285,7 @@ static void ShowMenu(int hitIdx) {
         case ID_AUTOHIDE: A.set.autoHide = !A.set.autoHide; RecalcGeometry(); SaveSettings(); break;
         case ID_LABELS: A.set.hideLabels = !A.set.hideLabels; A.dirty = true; SaveSettings(); break;
         case ID_RUNNING: A.set.showRunning = !A.set.showRunning; A.dirty = true; SaveSettings(); break;
+        case ID_SETTINGS: OpenSettings(); break;
         case ID_OPENINI: ShellExecuteW(nullptr, L"open", L"notepad.exe", (L"\"" + g_ini + L"\"").c_str(), nullptr, SW_SHOWNORMAL); break;
         case ID_RELOAD: Reload(); break;
         case ID_EXIT: DestroyWindow(A.hwnd); break;
@@ -1436,6 +1444,8 @@ static void Tick() {
     }
 }
 
+#include "settings_ui.h"
+
 // ---------------------------------------------------------------------------------------------
 // Fenêtre
 // ---------------------------------------------------------------------------------------------
@@ -1543,6 +1553,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (A.hwnd && A.dib) RecalcGeometry();
             return 0;
         case WM_DESTROY:
+            if (g_setWnd) DestroyWindow(g_setWnd);
             KillTimer(h, 1);
             UnregisterHotKey(h, 1);
             PostQuitMessage(0);
@@ -1553,8 +1564,19 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     // Instance unique
+    const bool restart = wcsstr(GetCommandLineW(), L"--restart") != nullptr;
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\RocketDockModern.SingleInstance");
-    if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (!restart) return 0;
+        // Redémarrage après mise à jour : on attend la fin de l'ancienne instance
+        DWORD w = WaitForSingleObject(mutex, 15000);
+        if (w != WAIT_OBJECT_0 && w != WAIT_ABANDONED) return 0;
+    }
+    {
+        wchar_t me[MAX_PATH * 2];
+        GetModuleFileNameW(nullptr, me, MAX_PATH * 2);
+        DeleteFileW((std::wstring(me) + L".old").c_str());  // reste d'une mise à jour précédente
+    }
 
     typedef BOOL(WINAPI * PFN_DpiCtx)(HANDLE);
     PFN_DpiCtx setCtx = (PFN_DpiCtx)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext");
@@ -1596,12 +1618,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     DragAcceptFiles(A.hwnd, TRUE);
 
     LoadSettings();
-    if (A.set.iconOpacity < 100) {
-        ColorMatrix cm = {};
-        for (int d = 0; d < 5; ++d) cm.m[d][d] = 1.0f;
-        cm.m[3][3] = A.set.iconOpacity / 100.0f;
-        A.ia->SetColorMatrix(&cm);
-    }
+    ApplyIconOpacity();
     QueryPerformanceFrequency(&A.freq);
     QueryPerformanceCounter(&A.last);
     ApplyMenuTheme();

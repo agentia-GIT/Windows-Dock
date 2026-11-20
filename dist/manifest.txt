@@ -1,0 +1,4 @@
+# Fichiers remplacés par la mise à jour (chemins relatifs au dossier de l exe).
+# Settings.ini n est jamais remplacé, même s il est listé ici.
+RocketDockModern_x64.exe
+RocketDockModern_x86.exe
