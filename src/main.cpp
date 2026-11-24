@@ -1082,7 +1082,7 @@ static void Render() {
 // ---------------------------------------------------------------------------------------------
 static void SaveSettings() {
     const Settings& s = A.set;
-    IniPut(kSecMain, L"Version", L"2.3.1");
+    IniPut(kSecMain, L"Version", L"2.3.2");
     IniPut(kSecMain, L"Position", SideName(s.side));
     IniPutInt(kSecMain, L"Offset", s.offset);
     IniPutInt(kSecMain, L"Monitor", s.monitor);

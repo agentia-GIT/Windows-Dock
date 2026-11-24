@@ -5,7 +5,7 @@
 #include <uxtheme.h>
 #include <winhttp.h>
 
-static const wchar_t* kVersionW = L"2.3.1";
+static const wchar_t* kVersionW = L"2.3.2";
 static const wchar_t* kDefaultUpdateUrl = L"https://raw.githubusercontent.com/agentia-GIT/Windows-Dock/main/dist/";
 
 enum {
@@ -35,7 +35,9 @@ static int g_dx = 0, g_dy = 0;  // décalage appliqué aux contrôles créés pa
 
 // Couleurs de l'interface, copiées du thème actif
 static COLORREF g_cBg = 0, g_cPanel = 0, g_cText = 0, g_cMuted = 0, g_cAccent = 0;
-static HBRUSH g_brBg = nullptr, g_brPanel = nullptr;
+static HBRUSH g_brBg = nullptr, g_brPanel = nullptr, g_brEdit = nullptr;
+static COLORREF g_cEdit = 0;
+static int g_minW = 0, g_minH = 0;
 static bool g_uiDark = true;
 
 static int SC(int v) { return (int)(v * A.g.S + 0.5f); }
@@ -53,6 +55,9 @@ static void UpdateUiColors() {
     g_uiDark = t.dark;
     if (g_brBg) DeleteObject(g_brBg);
     if (g_brPanel) DeleteObject(g_brPanel);
+    if (g_brEdit) DeleteObject(g_brEdit);
+    g_cEdit = Mix(g_cPanel, g_cText, 9);
+    g_brEdit = CreateSolidBrush(g_cEdit);
     g_brBg = CreateSolidBrush(g_cBg);
     g_brPanel = CreateSolidBrush(g_cPanel);
 }
@@ -83,7 +88,7 @@ static void ChkSet(HWND c, bool on) {
 }
 static bool IsSwitchId(int id) { return id >= IDC_AUTOHIDE && id <= IDC_FREEMODE; }
 static HWND Edt(HWND p, int x, int y, int w, int id) {
-    return Mk(p, L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, x, y, w, 26, id);
+    return Mk(p, L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER, x, y, w, 26, id);
 }
 static HWND Cmb(HWND p, int x, int y, int w, int id, std::initializer_list<const wchar_t*> items) {
     HWND c = Mk(p, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, x, y, w, 240, id);
@@ -944,7 +949,12 @@ static LRESULT CALLBACK PageProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_NOTIFY:
         case WM_DRAWITEM:
             return SendMessageW(GetParent(h), msg, wp, lp);
-        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLOREDIT: {
+            HDC dc = (HDC)wp;
+            SetTextColor(dc, g_cText);
+            SetBkColor(dc, g_cEdit);
+            return (LRESULT)g_brEdit;
+        }
         case WM_CTLCOLORLISTBOX: {
             HDC dc = (HDC)wp;
             SetTextColor(dc, g_cText);
@@ -1319,8 +1329,48 @@ static void RefreshSettingsTheme() {
     RedrawWindow(g_setWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
 }
 
+// Adapte la disposition à la taille de la fenêtre : la liste des éléments occupe toute la hauteur disponible.
+static void Relayout() {
+    if (!g_setWnd || !g_nav || !g_pg[0]) return;
+    RECT cr;
+    GetClientRect(g_setWnd, &cr);
+    const int cw = cr.right, ch = cr.bottom, nw = SC(190);
+    MoveWindow(g_nav, 0, 0, nw, ch, TRUE);
+    for (int i = 0; i < kPages; ++i)
+        if (g_pg[i]) MoveWindow(g_pg[i], nw, 0, cw - nw, ch, TRUE);
+    if (g_gal) MoveWindow(g_gal, 0, SC(84), cw - nw, std::max(50, ch - SC(84)), TRUE);
+    HWND p = g_pg[2], lv = p ? GetDlgItem(p, IDC_LIST) : nullptr;
+    if (!lv) return;
+    RECT lr;
+    GetWindowRect(lv, &lr);
+    POINT tl = {lr.left, lr.top};
+    ScreenToClient(p, &tl);
+    const int oldH = lr.bottom - lr.top, oldBottom = tl.y + oldH;
+    const int newH = std::max(SC(120), ch - tl.y - SC(284));  // 284 = boutons + champs + marge sous la liste
+    const int delta = newH - oldH;
+    if (!delta) return;
+    for (HWND c = GetWindow(p, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
+        if (c == lv) continue;
+        RECT r;
+        GetWindowRect(c, &r);
+        POINT q = {r.left, r.top};
+        ScreenToClient(p, &q);
+        if (q.y >= oldBottom) SetWindowPos(c, nullptr, q.x, q.y + delta, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    SetWindowPos(lv, nullptr, 0, 0, lr.right - lr.left, newH, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+        case WM_SIZE:
+            if (wp != SIZE_MINIMIZED) Relayout();
+            return 0;
+        case WM_GETMINMAXINFO: {
+            MINMAXINFO* mm = (MINMAXINFO*)lp;
+            mm->ptMinTrackSize.x = g_minW;
+            mm->ptMinTrackSize.y = g_minH;
+            return 0;
+        }
         case WM_ERASEBKGND: {
             RECT r;
             GetClientRect(h, &r);
@@ -1388,6 +1438,7 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_fontS) { DeleteObject(g_fontS); g_fontS = nullptr; }
             if (g_brBg) { DeleteObject(g_brBg); g_brBg = nullptr; }
             if (g_brPanel) { DeleteObject(g_brPanel); g_brPanel = nullptr; }
+            if (g_brEdit) { DeleteObject(g_brEdit); g_brEdit = nullptr; }
             return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
@@ -1428,19 +1479,28 @@ static void OpenSettings() {
     g_font = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     g_fontH = CreateFontW(-MulDiv(19, dpi, 72), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI Semibold");
     g_fontS = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-    RECT rc = {0, 0, SC(900), SC(620)};
-    DWORD style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+    // Hauteur : tout l'espace utile de l'écran (jusqu'à 1100 px logiques) pour voir la liste sans ascenseur
+    RECT wa = {};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    DWORD style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME | WS_CLIPCHILDREN;
+    RECT mn = {0, 0, SC(900), SC(620)};
+    AdjustWindowRectEx(&mn, style, FALSE, WS_EX_TOPMOST);
+    g_minW = mn.right - mn.left;
+    g_minH = mn.bottom - mn.top;
+    int frameH = (mn.bottom - mn.top) - SC(620);
+    int clientH = std::min(std::max((int)(wa.bottom - wa.top) - frameH - SC(16), SC(620)), SC(1100));
+    RECT rc = {0, 0, SC(900), clientH};
     AdjustWindowRectEx(&rc, style, FALSE, WS_EX_TOPMOST);
     int w = rc.right - rc.left, hgt = rc.bottom - rc.top;
-    int sx = GetSystemMetrics(SM_CXSCREEN), sy = GetSystemMetrics(SM_CYSCREEN);
+    int sx = wa.left * 2 + (wa.right - wa.left), sy = wa.top * 2 + (wa.bottom - wa.top);
     std::wstring title = std::wstring(kAppName) + L" - " + T(L"Paramètres", L"Settings");
     g_setWnd = CreateWindowExW(WS_EX_TOPMOST, L"RDMSettings", title.c_str(), style, (sx - w) / 2, std::max(0, (sy - hgt) / 2), w, hgt,
                                nullptr, nullptr, A.hInst, nullptr);
     if (!g_setWnd) return;
     HWND h = g_setWnd;
-    g_nav = CreateWindowExW(0, L"RDMNav", L"", WS_CHILD | WS_VISIBLE, 0, 0, SC(190), SC(620), h, (HMENU)(INT_PTR)IDC_NAV, A.hInst, nullptr);
+    g_nav = CreateWindowExW(0, L"RDMNav", L"", WS_CHILD | WS_VISIBLE, 0, 0, SC(190), clientH, h, (HMENU)(INT_PTR)IDC_NAV, A.hInst, nullptr);
     for (int i = 0; i < kPages; ++i)
-        g_pg[i] = CreateWindowExW(0, L"RDMPage", L"", WS_CHILD | WS_CLIPCHILDREN, SC(190), 0, SC(710), SC(620), h, nullptr, A.hInst, nullptr);
+        g_pg[i] = CreateWindowExW(0, L"RDMPage", L"", WS_CHILD | WS_CLIPCHILDREN, SC(190), 0, SC(710), clientH, h, nullptr, A.hInst, nullptr);
     g_dx = g_dy = 0;
     BuildPageAppearance(g_pg[0]);
     BuildPageBehavior(g_pg[1]);
@@ -1449,6 +1509,7 @@ static void OpenSettings() {
     BuildPageThemes(g_pg[4]);
     g_dx = g_dy = 0;
     GalRebuild();
+    Relayout();
     RefreshSettingsTheme();
     SyncControls();
     g_navSel = 0;
