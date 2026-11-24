@@ -58,3 +58,8 @@ Pour créer le vôtre : copiez un dossier existant, modifiez `theme.ini` (couleu
 
 L'application s'appelle désormais **Win-Dock** (`WinDock_x64.exe` / `WinDock_x86.exe`). `Settings.ini` reste inchangé et compatible.
 Les copies `RocketDockModern_x*.exe` de `dist/` ne servent qu'à migrer les anciennes installations lors de leur mise à jour directe.
+
+## Mise à jour directe
+
+`dist/` contient `version.txt`, `manifest.txt`, les exécutables et `Themes.zip` (tous les thèmes en une archive, décompressée avec `tar.exe` ou PowerShell). Après avoir recompilé : `python3 tools/make_dist.py <version>`.
+Le menu clic droit s'ouvre à côté de la zone des icônes pour ne jamais les recouvrir.

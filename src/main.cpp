@@ -1082,7 +1082,7 @@ static void Render() {
 // ---------------------------------------------------------------------------------------------
 static void SaveSettings() {
     const Settings& s = A.set;
-    IniPut(kSecMain, L"Version", L"2.3.0");
+    IniPut(kSecMain, L"Version", L"2.3.1");
     IniPut(kSecMain, L"Position", SideName(s.side));
     IniPutInt(kSecMain, L"Offset", s.offset);
     IniPutInt(kSecMain, L"Monitor", s.monitor);
@@ -1401,7 +1401,7 @@ static void RegisterToggleHotkey() {
 // ---------------------------------------------------------------------------------------------
 enum {
     ID_OPEN = 100, ID_ADMIN, ID_LOCATION, ID_REMOVE, ID_EMPTYBIN,
-    ID_ADDPROG = 200, ID_ADDSEP, ID_LOCK, ID_AUTOHIDE, ID_LABELS, ID_RUNNING, ID_OPENINI, ID_RELOAD, ID_EXIT, ID_SETTINGS,
+    ID_ADDPROG = 200, ID_ADDSEP, ID_LOCK, ID_AUTOHIDE, ID_LABELS, ID_RUNNING, ID_RELOAD, ID_EXIT, ID_SETTINGS,
     ID_POS = 300, ID_FREE = 310, ID_LOCKDOCK = 311, ID_SIZE = 320, ID_THEME = 1200
 };
 static const int kSizes[][2] = {{36, 64}, {44, 80}, {56, 100}, {68, 120}};
@@ -1434,6 +1434,7 @@ static void Reload() {
     ApplyIconOpacity();
 }
 
+static float MaxSize();
 static void ShowMenu(int hitIdx) {
     HMENU m = CreatePopupMenu();
     const bool onItem = hitIdx >= 0 && hitIdx < (int)A.items.size() && !A.items[hitIdx].sep;
@@ -1493,18 +1494,32 @@ static void ShowMenu(int hitIdx) {
     AppendMenuW(m, MF_STRING | (A.set.lockIcons ? MF_CHECKED : 0), ID_LOCK, T(L"Verrouiller les icônes", L"Lock icons"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_SETTINGS, T(L"Paramètres…", L"Settings…"));
-    AppendMenuW(m, MF_STRING, ID_OPENINI, T(L"Modifier Settings.ini", L"Edit Settings.ini"));
     AppendMenuW(m, MF_STRING, ID_RELOAD, T(L"Recharger la configuration", L"Reload configuration"));
     AppendMenuW(m, MF_STRING, ID_EXIT, T(L"Quitter", L"Exit"));
 
-    POINT pt;
-    GetCursorPos(&pt);
+    // Le menu s'ouvre à côté de la zone des icônes (zoom maximal compris), jamais par-dessus.
+    POINT cur;
+    GetCursorPos(&cur);
+    RECT wr;
+    GetWindowRect(A.hwnd, &wr);
+    const Geo& G = A.g;
+    float uA = A.realStart - G.padSide, uB = A.realStart + A.real.total + G.padSide;
+    if (A.items.empty()) { uA = G.L * 0.5f - 45 * G.S; uB = G.L * 0.5f + 45 * G.S; }
+    float vTop = G.edgeGap + std::max(G.barH, G.padBottom + MaxSize() + G.padTop) + 6 * G.S;
+    RectF zr = MapRect(uA, uB, 0, vTop);
+    RECT ex = {wr.left + (LONG)zr.X, wr.top + (LONG)zr.Y, wr.left + (LONG)(zr.X + zr.Width), wr.top + (LONG)(zr.Y + zr.Height)};
+    POINT pt = cur;
     UINT flags = TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY;
-    if (A.set.side == SIDE_BOTTOM) flags |= TPM_BOTTOMALIGN;
-    if (A.set.side == SIDE_RIGHT) flags |= TPM_RIGHTALIGN;
+    switch (A.set.side) {
+        case SIDE_TOP: pt.y = ex.bottom; flags |= TPM_TOPALIGN | TPM_VERTICAL; break;
+        case SIDE_LEFT: pt.x = ex.right; flags |= TPM_LEFTALIGN | TPM_HORIZONTAL; break;
+        case SIDE_RIGHT: pt.x = ex.left; flags |= TPM_RIGHTALIGN | TPM_HORIZONTAL; break;
+        default: pt.y = ex.top; flags |= TPM_BOTTOMALIGN | TPM_VERTICAL; break;
+    }
+    TPMPARAMS tp = {sizeof(tp), ex};
     A.menuOpen = true;
     SetForegroundWindow(A.hwnd);
-    int cmd = (int)TrackPopupMenu(m, flags, pt.x, pt.y, 0, A.hwnd, nullptr);
+    int cmd = (int)TrackPopupMenuEx(m, flags, pt.x, pt.y, A.hwnd, &tp);
     PostMessageW(A.hwnd, WM_NULL, 0, 0);
     A.menuOpen = false;
     DestroyMenu(m);
@@ -1555,7 +1570,6 @@ static void ShowMenu(int hitIdx) {
         case ID_LABELS: A.set.hideLabels = !A.set.hideLabels; A.dirty = true; SaveSettings(); break;
         case ID_RUNNING: A.set.showRunning = !A.set.showRunning; A.dirty = true; SaveSettings(); break;
         case ID_SETTINGS: OpenSettings(); break;
-        case ID_OPENINI: ShellExecuteW(nullptr, L"open", L"notepad.exe", (L"\"" + g_ini + L"\"").c_str(), nullptr, SW_SHOWNORMAL); break;
         case ID_RELOAD: Reload(); break;
         case ID_EXIT: DestroyWindow(A.hwnd); break;
         default:
@@ -2049,6 +2063,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     if (!A.hwnd) return 1;
     RegisterDragDrop(A.hwnd, &g_drop);
 
+    {   // migration : une ancienne mise à jour a pu déposer Themes.zip sans le décompresser
+        std::wstring z = ExeDir() + L"\\Themes.zip";
+        if (PathFileExistsW(z.c_str())) {
+            if (ExtractZip(z, ExeDir())) DeleteFileW(z.c_str());
+        }
+    }
     LoadSettings();
     ApplyIconOpacity();
     QueryPerformanceFrequency(&A.freq);

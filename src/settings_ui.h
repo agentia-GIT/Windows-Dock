@@ -5,7 +5,7 @@
 #include <uxtheme.h>
 #include <winhttp.h>
 
-static const wchar_t* kVersionW = L"2.3.0";
+static const wchar_t* kVersionW = L"2.3.1";
 static const wchar_t* kDefaultUpdateUrl = L"https://raw.githubusercontent.com/agentia-GIT/Windows-Dock/main/dist/";
 
 enum {
@@ -153,6 +153,7 @@ static void AutostartSet(bool on) {
 // ---------------------------------------------------------------------------------------------
 // Mise à jour directe (WinHTTP)
 // ---------------------------------------------------------------------------------------------
+static DWORD g_httpErr = 0;  // dernier code d'erreur WinHTTP (diagnostic)
 static HINTERNET g_sess = nullptr;  // session WinHTTP réutilisée pendant une mise à jour
 static void SessOpen() {
     if (g_sess) return;
@@ -190,6 +191,7 @@ static bool HttpGet(const std::wstring& url, const std::wstring& token, std::str
             WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
                                 &status, &sz, WINHTTP_NO_HEADER_INDEX);
             ok = true;
+            g_httpErr = 0;
             for (;;) {
                 DWORD avail = 0;
                 if (!WinHttpQueryDataAvailable(r, &avail) || avail == 0) break;
@@ -201,11 +203,60 @@ static bool HttpGet(const std::wstring& url, const std::wstring& token, std::str
                 if (out.size() > 64u * 1024 * 1024) { ok = false; break; }  // garde-fou
             }
         }
+        else g_httpErr = GetLastError();
         WinHttpCloseHandle(r);
+    } else {
+        g_httpErr = GetLastError();
     }
     if (c) WinHttpCloseHandle(c);
     if (own) SessClose();
     return ok;
+}
+
+// GET avec 3 tentatives (réseau instable, limitation 429, erreurs 5xx)
+static bool HttpGetRetry(const std::wstring& url, const std::wstring& token, std::string& out, DWORD& status) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (attempt) Sleep(700 * attempt);
+        if (HttpGet(url, token, out, status) && status == 200) return true;
+        if (status == 404 || status == 401 || status == 403) break;  // inutile de réessayer
+    }
+    return false;
+}
+// Description d'un échec : code HTTP ou code d'erreur réseau WinHTTP
+static std::wstring NetErr(DWORD st) {
+    return st ? L"HTTP " + ItoW((int)st) : (g_fr ? L"erreur réseau " : L"network error ") + ItoW((int)g_httpErr);
+}
+
+static bool RunHidden(const std::wstring& cmd, DWORD timeoutMs) {
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi = {};
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+    buf.push_back(0);
+    if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) return false;
+    DWORD code = 1;
+    if (WaitForSingleObject(pi.hProcess, timeoutMs) == WAIT_OBJECT_0) GetExitCodeProcess(pi.hProcess, &code);
+    else TerminateProcess(pi.hProcess, 1);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return code == 0;
+}
+// Décompresse un .zip dans un dossier avec tar.exe (Windows 10+), sinon PowerShell.
+static bool ExtractZip(const std::wstring& zip, const std::wstring& dir) {
+    wchar_t win[MAX_PATH] = {};
+    GetWindowsDirectoryW(win, MAX_PATH);
+    BOOL wow = FALSE;
+    if (sizeof(void*) == 4) IsWow64Process(GetCurrentProcess(), &wow);
+    std::wstring sys = std::wstring(win) + (wow ? L"\\Sysnative" : L"\\System32");
+    std::wstring tar = sys + L"\\tar.exe";
+    if (PathFileExistsW(tar.c_str()) && RunHidden(L"\"" + tar + L"\" -xf \"" + zip + L"\" -C \"" + dir + L"\"", 180000)) return true;
+    auto q = [](std::wstring v) { size_t i = 0; while ((i = v.find(L'\'', i)) != std::wstring::npos) { v.insert(i, 1, L'\''); i += 2; } return v; };
+    std::wstring ps = sys + L"\\WindowsPowerShell\\v1.0\\powershell.exe";
+    return RunHidden(L"\"" + ps + L"\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"Expand-Archive -LiteralPath '" + q(zip) +
+                         L"' -DestinationPath '" + q(dir) + L"' -Force\"",
+                     240000);
 }
 
 static std::wstring Utf8ToW(const std::string& s) {
@@ -244,9 +295,8 @@ static DWORD WINAPI UpdThread(LPVOID p) {
     };
     SessOpen();
     UpdPost(0, fr ? L"Connexion à GitHub…" : L"Connecting to GitHub…");
-    if (!HttpGet(job->base + L"version.txt", job->token, body, st) || st != 200)
-        return fail((fr ? L"Impossible de lire la version distante (HTTP " : L"Cannot read remote version (HTTP ") +
-                    ItoW((int)st) + L").");
+    if (!HttpGetRetry(job->base + L"version.txt", job->token, body, st))
+        return fail((fr ? L"Impossible de lire la version distante (" : L"Cannot read remote version (") + NetErr(st) + L").");
     std::wstring remote = TrimW(Utf8ToW(body));
     UpdPost(1, remote);
     if (!job->apply) {
@@ -255,11 +305,11 @@ static DWORD WINAPI UpdThread(LPVOID p) {
         delete job;
         return 0;
     }
-    if (!HttpGet(job->base + L"manifest.txt", job->token, body, st) || st != 200)
-        return fail(fr ? L"Liste des fichiers (manifest.txt) introuvable." : L"File list (manifest.txt) not found.");
+    if (!HttpGetRetry(job->base + L"manifest.txt", job->token, body, st))
+        return fail((fr ? L"Liste des fichiers (manifest.txt) introuvable (" : L"File list (manifest.txt) not found (") + NetErr(st) + L").");
 
     // Liste des fichiers à mettre à jour
-    struct F { std::wstring rel, tmp, dst; bool isExe; };
+    struct F { std::wstring rel, tmp, dst; bool isExe, isZip; };
     std::vector<F> files;
     {
         std::wstring txt = Utf8ToW(body);
@@ -285,6 +335,7 @@ static DWORD WINAPI UpdThread(LPVOID p) {
             F f;
             f.rel = line;
             f.isExe = (low == mine);
+            f.isZip = low.size() > 4 && low.substr(low.size() - 4) == L".zip";
             std::wstring local = line;
             std::replace(local.begin(), local.end(), L'/', L'\\');
             f.dst = f.isExe ? job->exePath : job->exeDir + L"\\" + local;
@@ -297,9 +348,9 @@ static DWORD WINAPI UpdThread(LPVOID p) {
     // Téléchargement dans des fichiers temporaires
     for (auto& f : files) {
         UpdPost(0, (fr ? L"Téléchargement : " : L"Downloading: ") + f.rel);
-        if (!HttpGet(job->base + f.rel, job->token, body, st) || st != 200 || body.empty()) {
+        if (!HttpGetRetry(job->base + f.rel, job->token, body, st) || body.empty()) {
             for (auto& g : files) DeleteFileW(g.tmp.c_str());
-            return fail((fr ? L"Échec du téléchargement : " : L"Download failed: ") + f.rel);
+            return fail((fr ? L"Échec du téléchargement : " : L"Download failed: ") + f.rel + L" (" + NetErr(st) + L")");
         }
         if (f.isExe && (body.size() < 64 || body[0] != 'M' || body[1] != 'Z')) {
             for (auto& g : files) DeleteFileW(g.tmp.c_str());
@@ -313,14 +364,24 @@ static DWORD WINAPI UpdThread(LPVOID p) {
         if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
         if (!okw) {
             for (auto& g : files) DeleteFileW(g.tmp.c_str());
-            return fail((fr ? L"Écriture impossible : " : L"Cannot write: ") + f.dst);
+            return fail((fr ? L"Écriture impossible (droits d'accès ?) : " : L"Cannot write (permissions?): ") + f.dst);
         }
     }
 
     // Remplacement : fichiers ordinaires d'abord, exécutable en dernier (renommé en .old puis remplacé)
     UpdPost(0, fr ? L"Remplacement des fichiers…" : L"Replacing files…");
     for (auto& f : files) {
-        if (f.isExe) continue;
+        if (!f.isZip) continue;  // archive (thèmes) : décompressée dans le dossier de l'application
+        UpdPost(0, (fr ? L"Décompression : " : L"Extracting: ") + f.rel);
+        bool okz = ExtractZip(f.tmp, job->exeDir);
+        DeleteFileW(f.tmp.c_str());
+        if (!okz) {
+            for (auto& g : files) DeleteFileW(g.tmp.c_str());
+            return fail(fr ? L"Décompression impossible (tar.exe / PowerShell indisponible ?)." : L"Cannot extract (tar.exe / PowerShell unavailable?).");
+        }
+    }
+    for (auto& f : files) {
+        if (f.isExe || f.isZip) continue;
         if (!MoveFileExW(f.tmp.c_str(), f.dst.c_str(), MOVEFILE_REPLACE_EXISTING))
             return fail((fr ? L"Remplacement impossible : " : L"Cannot replace: ") + f.rel);
     }
