@@ -1346,7 +1346,7 @@ static void Relayout() {
     POINT tl = {lr.left, lr.top};
     ScreenToClient(p, &tl);
     const int oldH = lr.bottom - lr.top, oldBottom = tl.y + oldH;
-    const int newH = std::max(SC(120), ch - tl.y - SC(284));  // 284 = boutons + champs + marge sous la liste
+    const int newH = std::max(SC(120), ch - (int)tl.y - SC(284));  // 284 = boutons + champs + marge sous la liste
     const int delta = newH - oldH;
     if (!delta) return;
     for (HWND c = GetWindow(p, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
